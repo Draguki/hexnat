@@ -27,7 +27,7 @@
      *** CHANGE THIS LINE before deploying ***
      Replace with your actual Vercel project URL.
   ───────────────────────────────────────────── */
-  var API_ENDPOINT = "https://hexneedle-analytics.vercel.app/api/track";
+  var API_ENDPOINT = "https://hexnat.vercel.app/api/track";
   var SITE_ID      = "hexneedle";
 
   /* Batching — send after this many events OR after this many ms (whichever comes first) */
