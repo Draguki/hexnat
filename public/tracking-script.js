@@ -301,9 +301,9 @@
     var name = "", price = "";
     if (container) {
       var nameEl  = container.querySelector("[class*='name'], [class*='title'], h2, h3");
-      var priceEl = container.querySelector(".shop-product-price, .product-price,[class*='price'], [data-type='price']");
+      var priceEl = document.querySelector(".price-container #productPrice [data-type='price']");
       name  = nameEl  ? (nameEl.innerText  || "").trim().slice(0, 100) : "";
-      price = priceEl ? (priceEl.innerText || "").replace(/[^0-9.]/g, "")     : "";
+      price = priceEl ? priceEl.textContent.trim() : "";
     }
 
     QUEUE.push(buildEvent("add_to_cart", {
