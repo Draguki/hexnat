@@ -558,7 +558,7 @@ export default function DashboardPage() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {/* Wordmark */}
           <img
-            src=""
+            src="https://i.imgur.com/gniKNYh.jpeg"
             alt="Hex Needle"
             style={{ height: 32, width: "auto", objectFit: "contain" }}
           />
