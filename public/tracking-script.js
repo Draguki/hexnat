@@ -294,11 +294,14 @@
     var btn = e.target && e.target.closest && e.target.closest(CART_SELECTORS);
     if (!btn) return;
 
-    var container = btn.closest("[class*='product']") || btn.parentElement;
+    var container = btn.closest(".shop-product-item") || 
+                    btn.closest("[class*='product-item']") || 
+                    btn.closest("[class*='product']") || 
+                    btn.parentElement;
     var name = "", price = "";
     if (container) {
       var nameEl  = container.querySelector("[class*='name'], [class*='title'], h2, h3");
-      var priceEl = container.querySelector("[class*='price'], [data-type='price']");
+      var priceEl = container.querySelector(".shop-product-price, .product-price,[class*='price'], [data-type='price']");
       name  = nameEl  ? (nameEl.innerText  || "").trim().slice(0, 100) : "";
       price = priceEl ? (priceEl.innerText || "").replace(/[^0-9.]/g, "")     : "";
     }
