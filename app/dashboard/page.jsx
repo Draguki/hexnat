@@ -557,23 +557,12 @@ export default function DashboardPage() {
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {/* Wordmark */}
-          <div
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: 6,
-              background: C.purple,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 14,
-              color: "#fff",
-              fontWeight: 700,
-            }}
-          >
-            H
-          </div>
-          <span style={{ fontWeight: 500, fontSize: 15 }}>HexNeedle Analytics</span>
+          <img
+            src=""
+            alt="Hex Needle"
+            style={{ height: 32, width: "auto", objectFit: "contain" }}
+          />
+          <span style={{ fontWeight: 500, fontSize: 15 }}>Hex Needle Analytics</span>
           {loading && (
             <span
               style={{
