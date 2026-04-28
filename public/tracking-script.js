@@ -285,6 +285,9 @@
     ".shop-product-buy",
     "button[class*='cart']",
     "a[class*='add-to-cart']",
+    ".btn-buy-now",           // ← SITE123 exact class
+    ".orderButtonPopup",      // ← SITE123 exact class
+    "[aria-label='Add To Cart']",
   ].join(", ");
 
   function onClickCart(e) {
