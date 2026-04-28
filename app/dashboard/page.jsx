@@ -481,7 +481,11 @@ function useDashboardData(rangeDays) {
       // ── 5. Traffic sources ───────────────────────────────────────────────
       const srcCount = {};
       for (const s of sourcesData || []) {
-        const key = s.utm_source || "direct";
+        const key = s.utm_source ||
+          (s.referrer?.includes("instagram") ? "instagram" :
+          s.referrer?.includes("facebook") ? "facebook" :
+          s.referrer?.includes("google") ? "google" :
+          s.referrer?.includes("whatsapp") ? "whatsapp" : "direct");
         srcCount[key] = (srcCount[key] || 0) + 1;
       }
       const sources = Object.entries(srcCount)
