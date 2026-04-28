@@ -559,7 +559,7 @@ export default function DashboardPage() {
           {/* Wordmark */}
           {/* Wordmark */}
           <img
-            src="https://i.imgur.com/gniKNYh.jpeg"
+            src="https://i.imgur.com/ervX8Sj.png"
             alt="HexNeedle"
             style={{ height: 32, width: "auto", objectFit: "contain" }}
           />
