@@ -67,6 +67,7 @@ const ALLOWED_EVENT_TYPES = new Set([
   "session_time",
   "scroll_depth",
   "dynamic_load",
+  "purchase",
 ]);
 
 function isString(v, max = 500) {
@@ -117,6 +118,16 @@ function buildProps(e) {
       return { duration_s: isNumber(e.duration_s) ? Math.round(e.duration_s) : null };
     case "scroll_depth":
       return { depth_pct: isNumber(e.depth_pct) ? e.depth_pct : null };
+    case "purchase":
+      return {
+        revenue:       isNumber(e.revenue)     ? e.revenue      : null,
+        currency:      isString(e.currency, 10) ? e.currency     : "INR",
+        order_id:      isString(e.order_id, 100) ? e.order_id   : null,
+        customer_city: isString(e.customer_city, 100) ? e.customer_city : null,
+        customer_state: isString(e.customer_state, 100) ? e.customer_state : null,
+        cart:          isString(e.cart, 2000)  ? e.cart         : null,
+        items_count:   isNumber(e.items_count) ? e.items_count  : null,
+      };
     default:
       return null;
   }
