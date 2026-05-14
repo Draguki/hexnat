@@ -454,6 +454,39 @@
       }
     }
   }
+  function trackPurchase() {
+    var isThankYou = win.location.href.includes("thank-you");
+    if (!isThankYou) return;
+  
+    // Deduplicate — don't fire again on page refresh
+    if (sessionStorage.getItem("hxa_purchased") === "true") return;
+  
+    // Read data stored by your existing plugins
+    var amount    = parseFloat(localStorage.getItem("hexneedle_amount")) || 0;
+    var orderRaw  = localStorage.getItem("orderData");
+    var orderData = orderRaw ? safeJSON(orderRaw) : {};
+  
+    if (amount <= 0) return; // no amount = not a real purchase
+  
+    QUEUE.push(buildEvent("purchase", {
+      revenue:      amount,
+      currency:     "INR",
+      order_id:     orderData.orderID  || null,
+      customer_city: orderData.city   || null,
+      customer_state: orderData.state || null,
+      cart:         orderData.cart    || null,
+      items_count:  orderData.cart
+                      ? orderData.cart.split("|").length
+                      : 1,
+    }));
+  
+    QUEUE.flushSync(); // send immediately, don't wait for batch
+  
+    // Mark as tracked so refresh doesn't double-count
+    sessionStorage.setItem("hxa_purchased", "true");
+  
+    log("purchase tracked ₹" + amount);
+  }
 
   boot();
 
