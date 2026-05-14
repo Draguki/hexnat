@@ -352,6 +352,12 @@ function useDashboardData(rangeDays) {
         { data: recentCartsData, error: rcErr },
       ] = await Promise.all([
         // All event counts for this period
+        // Add inside the Promise.all array:
+        supabase
+          .from("purchases")
+          .select("props")
+          .eq("type", "purchase")
+          .gte("ts", since),
         supabase
           .from("events")
           .select("type", { count: "exact" })
@@ -673,6 +679,12 @@ export default function DashboardPage() {
             value={loading ? "—" : fmtDuration(kpis?.avgSessionS || 0)}
             sub="Time on site"
             accent={C.coral}
+          />
+          <MetricCard
+            label="Revenue"
+            value={loading ? "—" : `₹${fmtCompact(kpis?.revenue || 0)}`}
+            sub={`${kpis?.orders || 0} orders`}
+            accent={C.teal}
           />
         </div>
 
