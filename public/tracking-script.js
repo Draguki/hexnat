@@ -431,6 +431,7 @@
      setTimeout(fn, 0) which is equally non-blocking.
   ───────────────────────────────────────────── */
   function init() {
+    trackPurchase();
     trackPageView();
     attachListeners();
     watchDynamicElements();
