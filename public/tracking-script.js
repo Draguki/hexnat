@@ -36,12 +36,16 @@
      - Generates unique eventID for each event
        (used for browser pixel ↔ CAPI deduplication)
   ───────────────────────────────────────────── */
+// Your dedicated analytics pixel ID
+  var PIXEL_ID = "4415595052018024";
+  
   function firePixel(eventName, params, eventID) {
     if (typeof win.fbq !== "function") return;
     var options = eventID ? { eventID: eventID } : {};
     try {
-      win.fbq("track", eventName, params || {}, options);
-      log("Meta Pixel:", eventName, params);
+      // trackSingle fires ONLY to this pixel, not to 768430759183182
+      win.fbq("trackSingle", PIXEL_ID, eventName, params || {}, options);
+      log("Meta Pixel " + PIXEL_ID + ":", eventName, params);
     } catch (e) {
       log("Meta Pixel error:", e.message);
     }
