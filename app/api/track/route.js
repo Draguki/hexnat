@@ -1,74 +1,339 @@
-// app/api/track/route.js
-// ---------------------------------------------------------------------------
-// ANALYTICS INGEST ENDPOINT + META CONVERSIONS API
+// app/api/track/route.js (V3)
+// ─────────────────────────────────────────────────────────────────────────
+// ANALYTICS INGEST + CUSTOMER PROFILING + META CONVERSIONS API (CAPI)
 //
-// Every event is:
-//   1. Written to Supabase (analytics)
-//   2. Forwarded to Meta CAPI for pixel 4415595052018024 (server-side signal)
+// v3 Features:
+//   1. Upserts customers table from raw PII
+//   2. Logs customer_timeline for journey analysis
+//   3. Hashes PII (SHA256) before sending to Meta CAPI
+//   4. Logs all CAPI calls for debugging
 //
-// CAPI gives Meta a server-side signal that survives ad blockers and iOS 14+
-// restrictions. The eventID links it to the browser pixel event for
-// deduplication — Meta sees both and counts it only once.
-//
-// Environment variables required (Vercel dashboard):
-//   SUPABASE_URL          — https://xxxx.supabase.co
-//   SUPABASE_SERVICE_KEY  — service_role key
-//   ALLOWED_ORIGIN        — https://www.hexneedle.com
-//   META_CAPI_TOKEN       — your Conversions API access token
-// ---------------------------------------------------------------------------
+// Environment variables required:
+//   SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGIN, META_CAPI_TOKEN
+// ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
+import { createHmac } from "crypto";
 
-// ---------------------------------------------------------------------------
-// SUPABASE
-// ---------------------------------------------------------------------------
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY,
   { auth: { persistSession: false } }
 );
 
-// ---------------------------------------------------------------------------
-// META CAPI CONFIG
-// ---------------------------------------------------------------------------
 const META_PIXEL_ID   = "4415595052018024";
 const META_CAPI_URL   = `https://graph.facebook.com/v20.0/${META_PIXEL_ID}/events`;
-const META_API_VERSION = "v20.0";
-
-// Maps our analytics event types → Meta standard event names
-const CAPI_EVENT_MAP = {
-  pageview:     null,          // handled specially — only product pages → ViewContent
-  add_to_cart:  "AddToCart",
-  form_submit:  null,          // handled specially — checkout vs lead
-  purchase:     "Purchase",
-  scroll_depth: null,          // no Meta event
-  session_time: null,          // no Meta event
-  click:        null,          // no Meta event
-  dynamic_load: null,          // no Meta event
-};
-
-// ---------------------------------------------------------------------------
-// CORS
-// ---------------------------------------------------------------------------
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://www.hexneedle.com";
 
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin":      ALLOWED_ORIGIN,
-    "Access-Control-Allow-Methods":     "POST, OPTIONS",
-    "Access-Control-Allow-Headers":     "Content-Type",
-    "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Max-Age":           "600",
+// ─────────────────────────────────────────────────────────────────────────
+// UTILITIES
+// ─────────────────────────────────────────────────────────────────────────
+
+// SHA256 hashing for Meta CAPI
+function sha256(str) {
+  if (!str) return null;
+  try {
+    return createHmac("sha256", "")
+      .update(str.toLowerCase().trim())
+      .digest("hex");
+  } catch (e) {
+    console.error("[HXA] SHA256 error:", e.message);
+    return null;
+  }
+}
+
+// Derive traffic source from UTM or referrer
+function deriveSource(utm, referrer) {
+  if (utm?.utm_source) {
+    if (utm.utm_source.includes("meta") || utm.utm_source.includes("facebook")) return "meta";
+    if (utm.utm_source.includes("google")) return "google";
+    return "utm:" + utm.utm_source;
+  }
+  if (referrer) {
+    if (referrer.includes("instagram") || referrer.includes("facebook")) return "meta";
+    if (referrer.includes("google")) return "google";
+    if (referrer.includes("whatsapp")) return "whatsapp";
+    return "referrer";
+  }
+  return "direct";
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CUSTOMER MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────
+
+async function upsertCustomer(event, ip, sessionId) {
+  const pii = event.pii || {};
+  const utm = event.utm || {};
+  
+  // Minimal customer identifier: email or phone
+  if (!pii.email && !pii.phone) return null;
+
+  const customerEmail = pii.email ? pii.email.toLowerCase().trim() : null;
+  const customerPhone = pii.phone ? pii.phone.trim() : null;
+
+  // Find existing customer or create one
+  let customerId = null;
+  if (customerEmail) {
+    const { data } = await supabase
+      .from("customers")
+      .select("id")
+      .eq("email", customerEmail)
+      .limit(1)
+      .single();
+    if (data) customerId = data.id;
+  } else if (customerPhone) {
+    const { data } = await supabase
+      .from("customers")
+      .select("id")
+      .eq("phone", customerPhone)
+      .limit(1)
+      .single();
+    if (data) customerId = data.id;
+  }
+
+  // Upsert customer record
+  const source = deriveSource(utm, event.referrer);
+  const customerData = {
+    site_id:              "hexneedle",
+    email:                customerEmail,
+    phone:                customerPhone,
+    name:                 pii.name || null,
+    city:                 pii.city || null,
+    state:                pii.state || null,
+    first_session_id:     sessionId,
+    last_session_id:      sessionId,
+    last_visit:           new Date(event.ts).toISOString(),
+    last_visit_path:      event.path || null,
+    utm_source:           utm.utm_source || null,
+    utm_medium:           utm.utm_medium || null,
+    utm_campaign:         utm.utm_campaign || null,
+    referrer:             event.referrer || null,
+    source:               source,
+    fbclid:               pii.fbclid || utm.fbclid || null,
+    data_version:         "V3",
   };
+
+  if (customerId) {
+    // Update existing customer
+    const { data, error } = await supabase
+      .from("customers")
+      .update({
+        ...customerData,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", customerId)
+      .select("id")
+      .single();
+
+    if (error) {
+      console.error("[HXA] Customer update error:", error.message);
+      return null;
+    }
+    return data?.id || customerId;
+  } else {
+    // Create new customer
+    const { data, error } = await supabase
+      .from("customers")
+      .insert({
+        ...customerData,
+        first_visit: new Date(event.ts).toISOString(),
+      })
+      .select("id")
+      .single();
+
+    if (error) {
+      console.error("[HXA] Customer insert error:", error.message);
+      return null;
+    }
+    return data?.id || null;
+  }
 }
 
-export async function OPTIONS() {
-  return new Response(null, { status: 200, headers: corsHeaders() });
+// ─────────────────────────────────────────────────────────────────────────
+// CUSTOMER TIMELINE
+// ─────────────────────────────────────────────────────────────────────────
+
+async function insertCustomerTimeline(customerId, event) {
+  if (!customerId || !event.type) return null;
+
+  // Build event label from type + data
+  let eventLabel = null;
+  switch (event.type) {
+    case "pageview":
+      eventLabel = `Viewed ${event.title || event.path || "page"}`;
+      break;
+    case "add_to_cart":
+      const prodName = event.props?.product_name || "Unknown product";
+      const price = event.props?.product_price;
+      eventLabel = `Added to Cart: ${prodName}${price ? " (₹" + price + ")" : ""}`;
+      break;
+    case "form_submit":
+      eventLabel = event.props?.lead_score === "full" ? "Initiated Checkout" : "Submitted Lead Form";
+      break;
+    case "purchase":
+      const rev = event.props?.revenue;
+      eventLabel = `Purchase ₹${rev || 0}`;
+      break;
+    default:
+      eventLabel = event.type.toUpperCase();
+  }
+
+  const { error } = await supabase
+    .from("customer_timeline")
+    .insert({
+      site_id:      "hexneedle",
+      customer_id:  customerId,
+      session_id:   event.session_id,
+      event_type:   event.type,
+      event_label:  eventLabel,
+      path:         event.path || null,
+      title:        event.title || null,
+      page_destination: event.props?.nav_dest || null,
+      props:        event.props || null,
+      ts:           new Date(event.ts).toISOString(),
+      data_version: "V3",
+    });
+
+  if (error) {
+    console.error("[HXA] Timeline insert error:", error.message);
+    return null;
+  }
+  return true;
 }
 
-// ---------------------------------------------------------------------------
-// VALIDATION
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────
+// META CAPI (v3: with SHA256 hashing)
+// ─────────────────────────────────────────────────────────────────────────
+
+async function sendCAPI(event, ip, userAgent, customerId) {
+  const token = process.env.META_CAPI_TOKEN;
+  if (!token) return;
+
+  let metaEventName = null;
+  let customData    = {};
+  let userData      = {
+    client_ip_address: ip || null,
+    client_user_agent: userAgent || null,
+  };
+
+  // v3: Hash PII before sending to Meta
+  if (event.pii) {
+    if (event.pii.email) {
+      const emailHash = await sha256Hash(event.pii.email);
+      if (emailHash) userData.em = [emailHash];
+    }
+    if (event.pii.phone) {
+      const phoneHash = await sha256Hash(event.pii.phone);
+      if (phoneHash) userData.ph = [phoneHash];
+    }
+  }
+
+  switch (event.type) {
+    case "purchase":
+      metaEventName = "Purchase";
+      customData = {
+        currency: "INR",
+        value:    isNumber(event.revenue) ? event.revenue : (event.props?.revenue || 0),
+      };
+      break;
+
+    case "add_to_cart":
+      metaEventName = "AddToCart";
+      customData = {
+        currency:     "INR",
+        value:        isNumber(event.product_price) ? event.product_price : 0,
+        content_name: isString(event.product_name, 200) ? event.product_name : "",
+      };
+      break;
+
+    case "form_submit":
+      metaEventName = event.props?.lead_score === "full" ? "InitiateCheckout" : "Lead";
+      break;
+
+    case "pageview":
+      if (event.path && (event.path.includes("/store/") || event.path.includes("/product"))) {
+        metaEventName = "ViewContent";
+        customData    = { content_name: isString(event.title, 200) ? event.title : "" };
+      }
+      break;
+
+    default:
+      return;
+  }
+
+  if (!metaEventName) return;
+
+  const eventID = event.props?.pixel_event_id ||
+                  `${event.type}_${event.ts}_${event.session_id?.slice(0, 8)}`;
+
+  const payload = {
+    data: [{
+      event_name:       metaEventName,
+      event_time:       Math.floor(event.ts / 1000),
+      event_id:         eventID,
+      event_source_url: isString(event.url, 2000) ? event.url : null,
+      action_source:    "website",
+      user_data:        Object.keys(userData).length ? userData : undefined,
+      custom_data:      Object.keys(customData).length ? customData : undefined,
+    }],
+    access_token: token,
+  };
+
+  try {
+    const res = await fetch(META_CAPI_URL, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify(payload),
+    });
+    const result = await res.json();
+
+    // Log CAPI call for audit
+    await supabase
+      .from("capi_events_sent")
+      .insert({
+        site_id:             "hexneedle",
+        event_name:          metaEventName,
+        event_id:            eventID,
+        customer_email_hash: userData.em?.[0] || null,
+        customer_phone_hash: userData.ph?.[0] || null,
+        payload:             payload,
+        meta_response:       result,
+        http_status:         res.status,
+        error_msg:           !res.ok ? JSON.stringify(result).slice(0, 500) : null,
+      })
+      .catch((e) => console.error("[HXA CAPI Log] Error:", e.message));
+
+    if (!res.ok) {
+      console.error("[HXA CAPI] Meta error:", JSON.stringify(result).slice(0, 200));
+    } else {
+      console.log(`[HXA CAPI] ✅ ${metaEventName} sent | eventID: ${eventID}`);
+    }
+  } catch (err) {
+    console.error("[HXA CAPI] Fetch failed:", err.message);
+  }
+}
+
+// Async SHA256 hashing (modern approach)
+async function sha256Hash(str) {
+  if (!str) return null;
+  try {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(str.toLowerCase().trim());
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => ("0" + b.toString(16)).slice(-2)).join("");
+  } catch (e) {
+    console.error("[HXA] Async SHA256 error:", e.message);
+    // Fallback to sync hash
+    return sha256(str);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CORE HANDLERS (existing, kept for backward compatibility)
+// ─────────────────────────────────────────────────────────────────────────
+
 const ALLOWED_EVENT_TYPES = new Set([
   "pageview", "click", "add_to_cart", "form_submit",
   "session_time", "scroll_depth", "dynamic_load", "purchase",
@@ -90,9 +355,6 @@ function validateEvent(e) {
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// PROPS BUILDER
-// ---------------------------------------------------------------------------
 function buildProps(e) {
   switch (e.type) {
     case "click":
@@ -100,6 +362,7 @@ function buildProps(e) {
         selector: isString(e.selector, 200) ? e.selector : null,
         text:     isString(e.text,     100) ? e.text     : null,
         href:     isString(e.href,     500) ? e.href     : null,
+        nav_dest: isString(e.nav_dest, 500) ? e.nav_dest : null,  // v3
         x_pct:    isNumber(e.x_pct)         ? e.x_pct   : null,
         y_pct:    isNumber(e.y_pct)         ? e.y_pct   : null,
       };
@@ -138,9 +401,6 @@ function buildProps(e) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// SUPABASE WRITERS
-// ---------------------------------------------------------------------------
 async function insertEvent(e) {
   const { error } = await supabase.from("events").insert({
     session_id:   e.session_id,
@@ -158,7 +418,8 @@ async function insertEvent(e) {
     utm_campaign: isString(e.utm?.utm_campaign, 100) ? e.utm.utm_campaign : null,
     referrer:     isString(e.referrer || e.utm?.referrer, 500)
                     ? (e.referrer || e.utm?.referrer) : null,
-    props: buildProps(e),
+    props:        buildProps(e),
+    data_version: "V3",  // v3: Mark all new events
   });
   return error ? error.message : null;
 }
@@ -176,6 +437,7 @@ async function upsertSession(e) {
       referrer:     isString(e.utm?.referrer,     500) ? e.utm.referrer      : null,
       locale:       isString(e.locale,             20) ? e.locale            : null,
       screen_w:     isNumber(e.screen_w)               ? e.screen_w          : null,
+      data_version: "V3",  // v3: Mark all new sessions
     },
     { onConflict: "id", ignoreDuplicates: false }
   );
@@ -188,99 +450,26 @@ async function upsertSession(e) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// META CAPI WRITER
-// Sends server-side signal to pixel 4415595052018024.
-// Runs in parallel with Supabase writes — never blocks the response.
-// ---------------------------------------------------------------------------
-async function sendCAPI(e, ip, userAgent) {
-  const token = process.env.META_CAPI_TOKEN;
-  if (!token) return; // skip if token not configured
-
-  // Determine Meta event name
-  let metaEventName = null;
-  let customData    = {};
-
-  switch (e.type) {
-    case "purchase":
-      metaEventName = "Purchase";
-      customData    = {
-        currency: "INR",
-        value:    isNumber(e.revenue) ? e.revenue : (e.props?.revenue || 0),
-      };
-      break;
-
-    case "add_to_cart":
-      metaEventName = "AddToCart";
-      customData    = {
-        currency:     "INR",
-        value:        isNumber(e.product_price) ? e.product_price : 0,
-        content_name: isString(e.product_name, 200) ? e.product_name : "",
-      };
-      break;
-
-    case "form_submit":
-      // Checkout form (has both email + phone) → InitiateCheckout
-      // Lead form (email only) → Lead
-      metaEventName = e.lead_score === "full" ? "InitiateCheckout" : "Lead";
-      break;
-
-    case "pageview":
-      // Only product pages → ViewContent
-      if (e.path && (e.path.includes("/store/") || e.path.includes("/product"))) {
-        metaEventName = "ViewContent";
-        customData    = { content_name: isString(e.title, 200) ? e.title : "" };
-      }
-      break;
-
-    default:
-      return; // no CAPI event for this type
-  }
-
-  if (!metaEventName) return;
-
-  // Use the pixel_event_id stored in props for deduplication with browser pixel
-  const eventID = e.props?.pixel_event_id ||
-                  e.pixel_event_id        ||
-                  `${e.type}_${e.ts}_${e.session_id?.slice(0, 8)}`;
-
-  const payload = {
-    data: [{
-      event_name:       metaEventName,
-      event_time:       Math.floor(e.ts / 1000),
-      event_id:         eventID,
-      event_source_url: isString(e.url, 2000) ? e.url : null,
-      action_source:    "website",
-      user_data: {
-        // IP and user agent improve match quality without requiring PII
-        client_ip_address: ip    || null,
-        client_user_agent: userAgent || null,
-      },
-      custom_data: Object.keys(customData).length ? customData : undefined,
-    }],
-    access_token: token,
+// ─────────────────────────────────────────────────────────────────────────
+// CORS
+// ─────────────────────────────────────────────────────────────────────────
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin":      ALLOWED_ORIGIN,
+    "Access-Control-Allow-Methods":     "POST, OPTIONS",
+    "Access-Control-Allow-Headers":     "Content-Type",
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Max-Age":           "600",
   };
-
-  try {
-    const res = await fetch(META_CAPI_URL, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify(payload),
-    });
-    const result = await res.json();
-    if (!res.ok) {
-      console.error("[HXA CAPI] Meta error:", JSON.stringify(result).slice(0, 200));
-    } else {
-      console.log(`[HXA CAPI] ✅ ${metaEventName} sent | eventID: ${eventID}`);
-    }
-  } catch (err) {
-    console.error("[HXA CAPI] Fetch failed:", err.message);
-  }
 }
 
-// ---------------------------------------------------------------------------
+export async function OPTIONS() {
+  return new Response(null, { status: 200, headers: corsHeaders() });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // RATE LIMITING
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────
 const rateMap = new Map();
 const RATE_LIMIT     = 300;
 const RATE_WINDOW_MS = 60 * 1000;
@@ -297,9 +486,9 @@ function isRateLimited(ip) {
   return r.count > RATE_LIMIT;
 }
 
-// ---------------------------------------------------------------------------
-// POST HANDLER
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────
+// POST HANDLER (v3)
+// ─────────────────────────────────────────────────────────────────────────
 export async function POST(request) {
   const headers = corsHeaders();
 
@@ -323,7 +512,6 @@ export async function POST(request) {
     });
   }
 
-  // Capture user agent for CAPI match quality
   const userAgent = request.headers.get("user-agent") || "";
 
   // Parse body
@@ -348,11 +536,19 @@ export async function POST(request) {
     batch.map(async (event) => {
       if (!validateEvent(event)) { results.rejected++; return; }
 
-      // Run Supabase writes + CAPI in parallel — CAPI failure never blocks analytics
+      // v3: Get or create customer from PII
+      const customerId = await upsertCustomer(event, ip, event.session_id);
+
+      // v3: Log customer timeline
+      if (customerId) {
+        await insertCustomerTimeline(customerId, event);
+      }
+
+      // All writes in parallel — CAPI failure never blocks
       const [evtErr, sesErr] = await Promise.all([
         insertEvent(event),
         upsertSession(event),
-        sendCAPI(event, ip, userAgent).catch((e) =>
+        sendCAPI(event, ip, userAgent, customerId).catch((e) =>
           console.error("[HXA CAPI] Unhandled:", e.message)
         ),
       ]);
