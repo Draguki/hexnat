@@ -1,19 +1,7 @@
 /**
- * HexNeedle Analytics — Tracking Script v2.0
+ * HexNeedle Analytics — Tracking Script v3.0
  * ===========================================
- * Dual purpose: Analytics → Supabase + Meta Pixel standard events
- *
- * META PIXEL EVENTS:
- *   Product page visit  → ViewContent
- *   Add to cart         → AddToCart     (value + currency)
- *   Order form submit   → InitiateCheckout
- *   Contact/lead form   → Lead
- *   Thank-you page      → Purchase      (value + currency)
- *
- * CONFLICT GUARANTEE:
- *   Full IIFE — zero globals. Storage keys prefixed hxa_.
- *   No preventDefault on any form. fbq calls guarded by typeof check.
- *   Does not touch orderData, hexneedle_amount, or purchase_tracked keys.
+ * Includes: UTMs, Heatmaps, Scroll Depth, Dynamic DOM, and v3 PII Identity Manager
  */
 
 (function (win, doc) {
@@ -28,27 +16,17 @@
   var BATCH_INTERVAL = 5000;
   var SESSION_TTL    = 30 * 60 * 1000;
   var PREFIX         = "hxa_";
+  var PIXEL_ID       = "4415595052018024";
 
   /* ─────────────────────────────────────────────
      META PIXEL HELPER
-     Single function for all fbq calls.
-     - Guards against fbq not loaded yet
-     - Generates unique eventID for each event
-       (used for browser pixel ↔ CAPI deduplication)
   ───────────────────────────────────────────── */
-// Your dedicated analytics pixel ID
-  var PIXEL_ID = "4415595052018024";
-  
   function firePixel(eventName, params, eventID) {
     if (typeof win.fbq !== "function") return;
     var options = eventID ? { eventID: eventID } : {};
     try {
-      // trackSingle fires ONLY to this pixel, not to 768430759183182
       win.fbq("trackSingle", PIXEL_ID, eventName, params || {}, options);
-      log("Meta Pixel " + PIXEL_ID + ":", eventName, params);
-    } catch (e) {
-      log("Meta Pixel error:", e.message);
-    }
+    } catch (e) {}
   }
 
   function makeEventID(prefix) {
@@ -58,14 +36,6 @@
   /* ─────────────────────────────────────────────
      UTILITIES
   ───────────────────────────────────────────── */
-  function log() {
-    if (false) { // set to true to debug
-      var a = Array.prototype.slice.call(arguments);
-      a.unshift("[HXA]");
-      Function.prototype.apply.call(console.log, console, a);
-    }
-  }
-
   function throttle(fn, ms) {
     var last = 0;
     return function () {
@@ -99,7 +69,6 @@
   ───────────────────────────────────────────── */
   var SESSION = (function () {
     var KEY = PREFIX + "sid";
-
     function load() {
       var raw = localStorage.getItem(KEY);
       if (!raw) return null;
@@ -108,15 +77,12 @@
       if (Date.now() - s.last > SESSION_TTL) return null;
       return s;
     }
-
     function create() {
       return { id: uuid(), start: Date.now(), last: Date.now() };
     }
-
     function persist(s) {
       try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) {}
     }
-
     var current = load() || create();
     persist(current);
 
@@ -128,11 +94,49 @@
   })();
 
   /* ─────────────────────────────────────────────
+     v3 IDENTITY MANAGER (PII)
+  ───────────────────────────────────────────── */
+  var IDENTITY = (function () {
+    var KEY = PREFIX + "pii";
+    var pii = safeJSON(localStorage.getItem(KEY)) || {};
+
+    function update(newData) {
+      var changed = false;
+      ['email', 'phone', 'name', 'city', 'state'].forEach(function(k) {
+        if (newData[k] && newData[k] !== pii[k]) { 
+          pii[k] = newData[k]; 
+          changed = true; 
+        }
+      });
+      if (changed) {
+        try { localStorage.setItem(KEY, JSON.stringify(pii)); } catch (e) {}
+      }
+    }
+
+    // Auto-extract from SITE123 checkout / forms if possible
+    function extractFromStorage() {
+      var orderData = safeJSON(localStorage.getItem("orderData")) || {};
+      update({
+        email: orderData.email || pii.email,
+        phone: orderData.phone || pii.phone,
+        name:  orderData.name || orderData.firstName || pii.name,
+        city:  orderData.city || pii.city,
+        state: orderData.state || pii.state
+      });
+    }
+
+    return { 
+      get: function() { extractFromStorage(); return pii; }, 
+      update: update 
+    };
+  })();
+
+  /* ─────────────────────────────────────────────
      UTM CAPTURE
   ───────────────────────────────────────────── */
   var UTM = (function () {
     var KEY    = PREFIX + "utm";
-    var PARAMS = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"];
+    var PARAMS = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid"];
 
     function fromURL() {
       var p = new URLSearchParams(win.location.search);
@@ -173,11 +177,7 @@
         method: "POST", credentials: "include", keepalive: true,
         headers: { "Content-Type": "application/json" },
         body: body,
-      }).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        log("Flush OK");
-      }).catch(function (err) {
-        log("Flush error:", err.message);
+      }).catch(function () {
         Array.prototype.push.apply(queue, batch);
       });
     }
@@ -214,17 +214,18 @@
       screen_w:    win.innerWidth || (win.screen && win.screen.width) || 0,
       locale:      navigator.language || "",
       utm:         UTM,
+      pii:         IDENTITY.get() // v3: Attaches known identity to every event
     }, props || {});
   }
 
   /* ─────────────────────────────────────────────
-     1. PURCHASE — runs first on thank-you page
-        Analytics → Supabase
-        Meta     → Purchase (value + currency)
+     1. PURCHASE
   ───────────────────────────────────────────── */
   function trackPurchase() {
     if (!win.location.href.includes("thank-you")) return;
     if (sessionStorage.getItem("hxa_purchased") === "true") return;
+
+    IDENTITY.get(); // Force one last extraction from orderData
 
     var amount    = parseFloat(localStorage.getItem("hexneedle_amount")) || 0;
     var orderRaw  = localStorage.getItem("orderData");
@@ -234,7 +235,6 @@
 
     var eventID = makeEventID("purchase");
 
-    // Analytics
     QUEUE.push(buildEvent("purchase", {
       revenue:        amount,
       currency:       "INR",
@@ -247,19 +247,12 @@
     }));
     QUEUE.flushSync();
 
-    // Meta Pixel
     firePixel("Purchase", { value: amount, currency: "INR" }, eventID);
-
     sessionStorage.setItem("hxa_purchased", "true");
-    log("Purchase tracked ₹" + amount);
   }
 
   /* ─────────────────────────────────────────────
      2. PAGE VIEW
-        Analytics → Supabase (always)
-        Meta     → ViewContent (product pages only)
-        Note: base pixel already fires PageView on
-        every page — we don't duplicate that here.
   ───────────────────────────────────────────── */
   function trackPageView() {
     QUEUE.push(buildEvent("pageview", { referrer: doc.referrer }));
@@ -272,13 +265,10 @@
         currency:         "INR",
       }, makeEventID("vc"));
     }
-
-    log("pageview", path);
   }
 
   /* ─────────────────────────────────────────────
      3. CLICK HEATMAP
-        Analytics only — no Meta standard event
   ───────────────────────────────────────────── */
   var onClickHeatmap = throttle(function (e) {
     var el = e.target;
@@ -292,40 +282,27 @@
       selector: tag + id + cls,
       text:     (el.innerText || "").trim().slice(0, 40),
       href:     el.href || (el.closest && el.closest("a") ? el.closest("a").href : "") || "",
-      x_pct:    win.innerWidth > 0
-                  ? Math.round((e.clientX / win.innerWidth) * 100) : 0,
-      y_pct:    doc.documentElement.scrollHeight > 0
-                  ? Math.round((e.clientY / doc.documentElement.scrollHeight) * 100) : 0,
+      x_pct:    win.innerWidth > 0 ? Math.round((e.clientX / win.innerWidth) * 100) : 0,
+      y_pct:    doc.documentElement.scrollHeight > 0 ? Math.round((e.clientY / doc.documentElement.scrollHeight) * 100) : 0,
     }));
   }, 200);
 
   /* ─────────────────────────────────────────────
      4. ADD TO CART
-        Analytics → Supabase
-        Meta     → AddToCart (value + currency + name)
   ───────────────────────────────────────────── */
   var CART_SELECTORS = [
-    ".add-to-cart",
-    "[data-action='add-to-cart']",
-    ".btn-add-to-cart",
-    ".shop-product-buy",
-    "button[class*='cart']",
-    "a[class*='add-to-cart']",
-    ".btn-buy-now",
-    ".orderButtonPopup",
-    "[aria-label='Add To Cart']",
+    ".add-to-cart", "[data-action='add-to-cart']", ".btn-add-to-cart",
+    ".shop-product-buy", "button[class*='cart']", "a[class*='add-to-cart']",
+    ".btn-buy-now", ".orderButtonPopup", "[aria-label='Add To Cart']",
   ].join(", ");
 
   function onClickCart(e) {
     var btn = e.target && e.target.closest && e.target.closest(CART_SELECTORS);
     if (!btn) return;
 
-    var container = btn.closest(".shop-product-item") ||
-                    btn.closest("[class*='product-item']") ||
-                    btn.closest("[class*='product']") ||
-                    btn.parentElement;
-
+    var container = btn.closest(".shop-product-item") || btn.closest("[class*='product-item']") || btn.closest("[class*='product']") || btn.parentElement;
     var name = "", price = "";
+    
     if (container) {
       var nameEl  = container.querySelector("[class*='name'], [class*='title'], h2, h3");
       var priceEl = doc.querySelector(".price-container #productPrice [data-type='price']");
@@ -336,7 +313,6 @@
     var numPrice = parseFloat(price) || 0;
     var eventID  = makeEventID("atc");
 
-    // Analytics
     QUEUE.push(buildEvent("add_to_cart", {
       product_name:   name,
       product_price:  numPrice,
@@ -344,21 +320,11 @@
       pixel_event_id: eventID,
     }));
 
-    // Meta Pixel
-    firePixel("AddToCart", {
-      content_name: name,
-      currency:     "INR",
-      value:        numPrice,
-    }, eventID);
-
-    log("AddToCart", name, numPrice);
+    firePixel("AddToCart", { content_name: name, currency: "INR", value: numPrice }, eventID);
   }
 
   /* ─────────────────────────────────────────────
      5. FORM SUBMIT
-        Analytics → Supabase
-        Meta     → InitiateCheckout (email + phone forms)
-                   Lead             (email-only forms)
   ───────────────────────────────────────────── */
   function onFormSubmit(e) {
     var form = e.target;
@@ -371,12 +337,17 @@
 
     var email = get('[name="email"], [type="email"]');
     var phone = get('[name="phone"], [type="tel"]');
+    
+    // v3: Capture any typed contact info immediately
+    if (email || phone) {
+      IDENTITY.update({ email: email, phone: phone });
+    }
+
     if (!email && !phone) return;
 
     var isCheckout = email && phone;
     var eventID    = makeEventID(isCheckout ? "ic" : "lead");
 
-    // Analytics
     QUEUE.push(buildEvent("form_submit", {
       has_email:      Boolean(email),
       has_phone:      Boolean(phone),
@@ -385,18 +356,11 @@
       pixel_event_id: eventID,
     }));
 
-    // Meta Pixel
-    if (isCheckout) {
-      firePixel("InitiateCheckout", {}, eventID);
-      log("InitiateCheckout");
-    } else {
-      firePixel("Lead", {}, eventID);
-      log("Lead");
-    }
+    firePixel(isCheckout ? "InitiateCheckout" : "Lead", {}, eventID);
   }
 
   /* ─────────────────────────────────────────────
-     6. SCROLL DEPTH — analytics only
+     6. SCROLL DEPTH
   ───────────────────────────────────────────── */
   var maxScrollPct = 0;
   var onScroll = throttle(function () {
@@ -413,7 +377,7 @@
   }, 300);
 
   /* ─────────────────────────────────────────────
-     7. SESSION TIME — analytics only
+     7. SESSION TIME
   ───────────────────────────────────────────── */
   function onPageHide() {
     QUEUE.push(buildEvent("session_time", { duration_s: SESSION.age() }));
@@ -440,7 +404,6 @@
   ───────────────────────────────────────────── */
   function watchDynamicElements() {
     if (!win.MutationObserver) return;
-
     var observer = new MutationObserver(
       debounce(function (mutations) {
         mutations.forEach(function (m) {
@@ -455,7 +418,6 @@
         });
       }, 400)
     );
-
     observer.observe(doc.body || doc.documentElement, { childList: true, subtree: true });
     setTimeout(function () { observer.disconnect(); }, 15000);
   }
@@ -464,24 +426,19 @@
      INIT
   ───────────────────────────────────────────── */
   function init() {
-    trackPurchase();        // thank-you page: analytics + Meta Purchase
-    trackPageView();        // all pages: analytics + Meta ViewContent (product pages)
-    attachListeners();      // AddToCart, InitiateCheckout, Lead, heatmap, scroll, session
-    watchDynamicElements(); // SITE123 late-loaded product sections
-    log("HXA v2.0 initialized | session:", SESSION.id());
+    trackPurchase();       
+    trackPageView();        
+    attachListeners();      
+    watchDynamicElements(); 
   }
 
   function boot() {
     if (doc.readyState === "loading") {
       doc.addEventListener("DOMContentLoaded", function () {
-        win.requestIdleCallback
-          ? win.requestIdleCallback(init, { timeout: 2000 })
-          : setTimeout(init, 0);
+        win.requestIdleCallback ? win.requestIdleCallback(init, { timeout: 2000 }) : setTimeout(init, 0);
       });
     } else {
-      win.requestIdleCallback
-        ? win.requestIdleCallback(init, { timeout: 2000 })
-        : setTimeout(init, 0);
+      win.requestIdleCallback ? win.requestIdleCallback(init, { timeout: 2000 }) : setTimeout(init, 0);
     }
   }
 
