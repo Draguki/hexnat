@@ -1,8 +1,7 @@
-// app/dashboard/page.jsx (V3 Enhanced)
+// app/dashboard/page.jsx (V3.1 FULL - 1115+ LINES)
 // ─────────────────────────────────────────────────────────────────────────
-// HexNeedle Analytics Dashboard v3.0
-// Features: Customers page, timeline, custom date range, CAPI testing,
-//           mobile responsive, smooth animations
+// HexNeedle Analytics Dashboard v3.1
+// Features: Overview, Customers, Orders (New), CAPI Testing
 // ─────────────────────────────────────────────────────────────────────────
 
 "use client";
@@ -14,6 +13,9 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, LineChart, Line,
 } from "recharts";
+
+// Import the new OrdersPage component
+import OrdersPage from "./orders-page";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -167,8 +169,6 @@ function FunnelRow({ label, value, max, color, convRate }) {
     </div>
   );
 }
-
-
 
 function PageRow({ rank, path, views, unique, maxViews }) {
   const pct = maxViews > 0 ? (views / maxViews) * 100 : 0;
@@ -370,35 +370,35 @@ function useDashboardData(rangeDays) {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 30_000);
-    return () => clearInterval(t);
+    const timer = setInterval(load, 30000); // Auto refresh every 30s
+    return () => clearInterval(timer);
   }, [load]);
 
-  return { ...state, refetch: load };
+  return { ...state, refresh: load };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// OVERVIEW PAGE
+// ─────────────────────────────────────────────────────────────────────────
+function OverviewPage({ range }) {
+  const { loading, error, kpis, daily, topPages, sources, recentCarts } = useDashboardData(range);
 
-function OverviewPage({ range = 30 }) {
-  const { loading, error, kpis, daily, topPages, sources, recentCarts, refetch } =
-    useDashboardData(range);
+  if (error) {
+    return (
+      <div style={{ padding: "2rem", color: C.error, textAlign: "center" }}>
+        <p style={{ fontWeight: 600 }}>Failed to load dashboard data</p>
+        <p style={{ fontSize: 13, marginTop: 4 }}>{error}</p>
+      </div>
+    );
+  }
 
-  const funnelMax = kpis?.sessions || 1;
+  const funnelMax = kpis?.sessions || 0;
 
   return (
-    <div style={{ maxWidth: 1200, margin: "0 auto", padding: "1.5rem 1.5rem 4rem" }}>
-        {error && (
-          <div style={{ marginBottom: "1rem", padding: "10px 16px", background: "#FAECE7",
-            borderRadius: 8, fontSize: 13, color: C.coral, border: `0.5px solid ${C.coral}` }}>
-            ⚠ {error}
-          </div>
-        )}
-
-        {/* ── KPI CARDS ─────────────────────────────────────────── */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-          gap: 12, marginBottom: "1.25rem" }}>
-          <MetricCard label="Page Views"
-            value={loading ? "—" : fmtCompact(kpis?.pageviews || 0)}
-            sub={`Last ${range} days`} accent={C.purple} />
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+        
+        {/* ── KPI GRID ────────────────────────────────────────────── */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <MetricCard label="Sessions"
             value={loading ? "—" : fmtCompact(kpis?.sessions || 0)}
             sub="Unique browser sessions" accent={C.teal} />
@@ -1014,6 +1014,10 @@ export default function DashboardPage() {
       );
     }
 
+    if (currentPage === "orders") {
+      return <OrdersPage />;
+    }
+
     if (currentPage === "capi") {
       return <CAPITestingPage />;
     }
@@ -1048,12 +1052,13 @@ export default function DashboardPage() {
               alt="HexNeedle"
               style={{ height: 32, width: "auto", objectFit: "contain" }}
             />
-            <span style={{ fontWeight: 500, fontSize: 15 }}>HexNeedle v3</span>
+            <span style={{ fontWeight: 500, fontSize: 15 }}>HexNeedle v3.1</span>
           </div>
           <div style={{ display: "flex", gap: 8, borderLeft: `0.5px solid ${C.border}`, paddingLeft: 16 }}>
             {[
               { id: "overview", label: "Overview" },
               { id: "customers", label: "Customers" },
+              { id: "orders", label: "Orders" },
               { id: "capi", label: "CAPI Testing" },
             ].map((tab) => (
               <button
