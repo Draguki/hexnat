@@ -1,8 +1,8 @@
 /**
- * HexNeedle Analytics — Tracking Script v3.0
+ * HexNeedle Analytics — Tracking Script v3.1
  * ===========================================
- * NEW: Customer identity tracking, SHA256 hashing for Meta CAPI,
- *      Raw PII for internal Supabase analytics, nav_dest tracking
+ * NEW: utm_content (ad.name) capture, enhanced Add-to-Cart with product URL/image,
+ *      full UTM attribution on every event
  */
 
 (function (win, doc) {
@@ -24,7 +24,6 @@
   ───────────────────────────────────────────── */
   function sha256Hash(str) {
     if (!str) return null;
-    // Use SubtleCrypto API if available
     if (win.crypto && win.crypto.subtle) {
       var encoder = new TextEncoder();
       return win.crypto.subtle.digest("SHA-256", encoder.encode(str))
@@ -34,7 +33,6 @@
         })
         .catch(function() { return null; });
     }
-    // Fallback: simple hash (not cryptographically secure, but ok for non-critical use)
     return Promise.resolve(simpleHash(str));
   }
 
@@ -143,7 +141,6 @@
       }
     }
 
-    // Auto-extract from SITE123 checkout / forms
     function extractFromStorage() {
       var orderData = safeJSON(localStorage.getItem("orderData")) || {};
       update({
@@ -163,7 +160,7 @@
   })();
 
   /* ─────────────────────────────────────────────
-     UTM CAPTURE
+     UTM CAPTURE (v3.1: Now includes utm_content)
   ───────────────────────────────────────────── */
   var UTM = (function () {
     var KEY    = PREFIX + "utm";
@@ -182,7 +179,6 @@
 
     if (Object.keys(fresh).length) {
       try { sessionStorage.setItem(KEY, JSON.stringify(fresh)); } catch (e) {}
-      // Also capture fbclid in identity
       if (fresh.fbclid) IDENTITY.update({ fbclid: fresh.fbclid });
       return fresh;
     }
@@ -232,7 +228,7 @@
   })();
 
   /* ─────────────────────────────────────────────
-     EVENT BUILDER
+     EVENT BUILDER (v3.1: Full UTM on every event)
   ───────────────────────────────────────────── */
   function buildEvent(type, props) {
     var identity = IDENTITY.get();
@@ -248,7 +244,7 @@
       screen_w:    win.innerWidth || (win.screen && win.screen.width) || 0,
       locale:      navigator.language || "",
       utm:         UTM,
-      pii:         identity  // v3: Raw PII attached to every event
+      pii:         identity
     }, props || {});
   }
 
@@ -321,14 +317,14 @@
       selector: tag + id + cls,
       text:     (el.innerText || "").trim().slice(0, 40),
       href:     href,
-      nav_dest: href ? new URL(href, win.location).pathname : null,  // v3: dest page
+      nav_dest: href ? new URL(href, win.location).pathname : null,
       x_pct:    win.innerWidth > 0 ? Math.round((e.clientX / win.innerWidth) * 100) : 0,
       y_pct:    doc.documentElement.scrollHeight > 0 ? Math.round((e.clientY / doc.documentElement.scrollHeight) * 100) : 0,
     }));
   }, 200);
 
   /* ─────────────────────────────────────────────
-     4. ADD TO CART + v3 customer data
+     4. ADD TO CART (v3.1: Enhanced with URL, image, utm_content)
   ───────────────────────────────────────────── */
   var CART_SELECTORS = [
     ".add-to-cart", "[data-action='add-to-cart']", ".btn-add-to-cart",
@@ -341,13 +337,18 @@
     if (!btn) return;
 
     var container = btn.closest(".shop-product-item") || btn.closest("[class*='product-item']") || btn.closest("[class*='product']") || btn.parentElement;
-    var name = "", price = "";
+    var name = "", price = "", productUrl = "", productImage = "";
     
     if (container) {
       var nameEl  = container.querySelector("[class*='name'], [class*='title'], h2, h3");
       var priceEl = doc.querySelector(".price-container #productPrice [data-type='price']");
+      var linkEl  = container.querySelector("a[href*='/product'], a[href*='/store']");
+      var imgEl   = container.querySelector("img[alt*='product'], img[class*='product']");
+      
       name  = nameEl  ? (nameEl.innerText  || "").trim().slice(0, 100) : "";
       price = priceEl ? priceEl.textContent.trim() : "";
+      productUrl = linkEl ? linkEl.href : win.location.href;
+      productImage = imgEl ? imgEl.src : "";
     }
 
     var numPrice = parseFloat(price) || 0;
@@ -356,9 +357,11 @@
     QUEUE.push(buildEvent("add_to_cart", {
       product_name:   name,
       product_price:  numPrice,
+      product_url:    productUrl,
+      product_image:  productImage,
       button_text:    (btn.innerText || "").trim().slice(0, 60),
       pixel_event_id: eventID,
-      // v3: Capture customer identity at cart time (increases EMQ for returning users)
+      utm_content:    UTM.utm_content || null,  // v3.1: Ad name
     }));
 
     firePixel("AddToCart", { content_name: name, currency: "INR", value: numPrice }, eventID);
@@ -371,118 +374,99 @@
     var form = e.target;
     if (!form || form.tagName !== "FORM") return;
 
-    var get = function (sel) {
-      var el = form.querySelector(sel);
-      return el ? (el.value || "").trim() : "";
-    };
-
-    var email = get('[name="email"], [type="email"]');
-    var phone = get('[name="phone"], [type="tel"]');
-    
-    // v3: Capture and store identity
-    if (email || phone) {
-      IDENTITY.update({ email: email, phone: phone });
+    var hasEmail = false, hasPhone = false, leadScore = "partial";
+    var inputs = form.querySelectorAll("input");
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      if (inp.type === "email" && inp.value) hasEmail = true;
+      if ((inp.type === "tel" || inp.name.includes("phone")) && inp.value) hasPhone = true;
     }
+    if (hasEmail && hasPhone) leadScore = "full";
 
-    if (!email && !phone) return;
-
-    var isCheckout = email && phone;
-    var eventID    = makeEventID(isCheckout ? "ic" : "lead");
-
+    var eventID = makeEventID("form");
     QUEUE.push(buildEvent("form_submit", {
-      has_email:      Boolean(email),
-      has_phone:      Boolean(phone),
-      form_id:        form.id || (form.className || "").split(" ")[0] || "unknown",
-      lead_score:     isCheckout ? "full" : email ? "email_only" : "phone_only",
+      has_email:  hasEmail,
+      has_phone:  hasPhone,
+      form_id:    form.id || null,
+      lead_score: leadScore,
       pixel_event_id: eventID,
     }));
 
-    firePixel(isCheckout ? "InitiateCheckout" : "Lead", {}, eventID);
+    firePixel("Lead", {}, eventID);
   }
 
   /* ─────────────────────────────────────────────
-     6. SCROLL DEPTH
+     6. SESSION TIME
   ───────────────────────────────────────────── */
-  var maxScrollPct = 0;
-  var onScroll = throttle(function () {
-    var scrolled = win.scrollY + win.innerHeight;
-    var total    = doc.documentElement.scrollHeight;
-    var pct      = total > 0 ? Math.round((scrolled / total) * 100) : 0;
+  var SESSION_START = Date.now();
+  function onPageHide() {
+    var duration_s = Math.round((Date.now() - SESSION_START) / 1000);
+    if (duration_s > 0) {
+      QUEUE.push(buildEvent("session_time", { duration_s: duration_s }));
+      QUEUE.flushSync();
+    }
+  }
 
-    if (pct > maxScrollPct) {
-      maxScrollPct = pct;
-      if (maxScrollPct % 25 === 0 && maxScrollPct > 0) {
-        QUEUE.push(buildEvent("scroll_depth", { depth_pct: maxScrollPct }));
+  /* ─────────────────────────────────────────────
+     7. SCROLL DEPTH
+  ───────────────────────────────────────────── */
+  var maxDepth = 0;
+  var onScroll = throttle(function () {
+    var scrollHeight = doc.documentElement.scrollHeight - win.innerHeight;
+    if (scrollHeight <= 0) return;
+    var depth_pct = Math.round((win.scrollY / scrollHeight) * 100);
+    if (depth_pct > maxDepth) {
+      maxDepth = depth_pct;
+      if (depth_pct >= 25 && depth_pct % 25 === 0) {
+        QUEUE.push(buildEvent("scroll_depth", { depth_pct: depth_pct }));
       }
     }
-  }, 300);
+  }, 500);
 
   /* ─────────────────────────────────────────────
-     7. SESSION TIME
+     8. DYNAMIC CONTENT LOAD
   ───────────────────────────────────────────── */
-  function onPageHide() {
-    QUEUE.push(buildEvent("session_time", { duration_s: SESSION.age() }));
-    QUEUE.flushSync();
+  function onDynamicLoad() {
+    QUEUE.push(buildEvent("dynamic_load", {}));
   }
 
-  /* ─────────────────────────────────────────────
-     EVENT DELEGATION
-  ───────────────────────────────────────────── */
-  function attachListeners() {
-    doc.addEventListener("click",  onClickHeatmap, { passive: true });
-    doc.addEventListener("click",  onClickCart,    { passive: true });
-    doc.addEventListener("submit", onFormSubmit,   { capture: true });
-    win.addEventListener("scroll", onScroll,       { passive: true });
+  var observer = new MutationObserver(debounce(onDynamicLoad, 1000));
+  observer.observe(doc.body, { childList: true, subtree: true });
 
-    doc.addEventListener("visibilitychange", function () {
-      if (doc.visibilityState === "hidden") onPageHide();
+  /* ─────────────────────────────────────────────
+     BOOTSTRAP
+  ───────────────────────────────────────────── */
+  if (doc.readyState === "loading") {
+    doc.addEventListener("DOMContentLoaded", function () {
+      trackPageView();
+      doc.addEventListener("click", onClickHeatmap, true);
+      doc.addEventListener("click", onClickCart, true);
+      doc.addEventListener("submit", onFormSubmit, true);
+      win.addEventListener("scroll", onScroll, true);
+      win.addEventListener("pagehide", onPageHide);
+      trackPurchase();
     });
+  } else {
+    trackPageView();
+    doc.addEventListener("click", onClickHeatmap, true);
+    doc.addEventListener("click", onClickCart, true);
+    doc.addEventListener("submit", onFormSubmit, true);
+    win.addEventListener("scroll", onScroll, true);
     win.addEventListener("pagehide", onPageHide);
+    trackPurchase();
   }
 
-  /* ─────────────────────────────────────────────
-     DYNAMIC DOM WATCHER
-  ───────────────────────────────────────────── */
-  function watchDynamicElements() {
-    if (!win.MutationObserver) return;
-    var observer = new MutationObserver(
-      debounce(function (mutations) {
-        mutations.forEach(function (m) {
-          m.addedNodes.forEach(function (node) {
-            if (node.nodeType !== 1) return;
-            if (node.querySelector && node.querySelector("[class*='product']")) {
-              QUEUE.push(buildEvent("dynamic_load", {
-                element: node.tagName.toLowerCase() + (node.id ? "#" + node.id : ""),
-              }));
-            }
-          });
-        });
-      }, 400)
-    );
-    observer.observe(doc.body || doc.documentElement, { childList: true, subtree: true });
-    setTimeout(function () { observer.disconnect(); }, 15000);
-  }
-
-  /* ─────────────────────────────────────────────
-     INIT
-  ───────────────────────────────────────────── */
-  function init() {
-    trackPurchase();       
-    trackPageView();        
-    attachListeners();      
-    watchDynamicElements(); 
-  }
-
-  function boot() {
-    if (doc.readyState === "loading") {
-      doc.addEventListener("DOMContentLoaded", function () {
-        win.requestIdleCallback ? win.requestIdleCallback(init, { timeout: 2000 }) : setTimeout(init, 0);
-      });
-    } else {
-      win.requestIdleCallback ? win.requestIdleCallback(init, { timeout: 2000 }) : setTimeout(init, 0);
-    }
-  }
-
-  boot();
+  // Public API
+  win.HexAnalytics = {
+    trackEvent: function(type, props) {
+      QUEUE.push(buildEvent(type, props));
+    },
+    setIdentity: function(data) {
+      IDENTITY.update(data);
+    },
+    getSession: function() {
+      return { id: SESSION.id(), age: SESSION.age() };
+    },
+  };
 
 })(window, document);
