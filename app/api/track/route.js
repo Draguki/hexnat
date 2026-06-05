@@ -368,10 +368,10 @@ function buildProps(e) {
       };
     case "add_to_cart":
       return {
-        product_name:  isString(e.product_name,  200) ? e.product_name  : null,
-        product_price: isNumber(e.product_price)       ? e.product_price : null,
-        button_text:   isString(e.button_text,   100) ? e.button_text   : null,
-        pixel_event_id: isString(e.pixel_event_id, 100) ? e.pixel_event_id : null,
+        product_name:  isString(e.product_name || e.props?.product_name, 200) ? (e.product_name || e.props?.product_name) : null,
+        product_price: isNumber(e.product_price || e.props?.product_price) ? (e.product_price || e.props?.product_price) : null,
+        button_text:   isString(e.button_text || e.props?.button_text, 100) ? (e.button_text || e.props?.button_text) : null,
+        pixel_event_id: isString(e.pixel_event_id || e.props?.pixel_event_id, 100) ? (e.pixel_event_id || e.props?.pixel_event_id) : null,
       };
     case "form_submit":
       return {
@@ -544,10 +544,50 @@ export async function POST(request) {
         await insertCustomerTimeline(customerId, event);
       }
 
+      // v3.1: Update active_carts for add_to_cart events
+      let cartPromise = Promise.resolve();
+      if (event.type === "add_to_cart") {
+        cartPromise = (async () => {
+          try {
+            const { data: existingCart } = await supabase
+              .from("active_carts")
+              .select("items, total_items, total_revenue")
+              .eq("session_id", event.session_id)
+              .single();
+
+            const newItem = {
+              name: event.product_name || event.props?.product_name || "Unknown",
+              price: parseFloat(event.product_price || event.props?.product_price || 0),
+              qty: 1,
+              added_at: new Date(event.ts).toISOString()
+            };
+
+            const items = existingCart?.items ? [...existingCart.items, newItem] : [newItem];
+            const total_items = (existingCart?.total_items || 0) + 1;
+            const total_revenue = (parseFloat(existingCart?.total_revenue || 0)) + newItem.price;
+
+            await supabase.from("active_carts").upsert({
+              session_id: event.session_id,
+              customer_id: customerId,
+              items,
+              total_items,
+              total_revenue,
+              utm_source: event.utm?.utm_source || null,
+              utm_medium: event.utm?.utm_medium || null,
+              utm_campaign: event.utm?.utm_campaign || null,
+              last_updated: new Date(event.ts).toISOString(),
+            }, { onConflict: "session_id" });
+          } catch (e) {
+            console.error("[HXA API] Cart update error:", e.message);
+          }
+        })();
+      }
+
       // All writes in parallel — CAPI failure never blocks
       const [evtErr, sesErr] = await Promise.all([
         insertEvent(event),
         upsertSession(event),
+        cartPromise,
         sendCAPI(event, ip, userAgent, customerId).catch((e) =>
           console.error("[HXA CAPI] Unhandled:", e.message)
         ),

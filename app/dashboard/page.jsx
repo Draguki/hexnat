@@ -14,6 +14,8 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, LineChart, Line,
 } from "recharts";
+import LiveCartsWidget from "./live-carts-widget";
+import OrdersPage from "./orders-page-v3-1";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -523,42 +525,7 @@ function OverviewPage({ range = 30 }) {
             )}
           </Card>
 
-          <Card>
-            <SectionHead title="Recent add to carts" sub="Last 15 events" />
-            {recentCarts.length === 0 ? (
-              <p style={{ fontSize: 13, color: C.muted }}>No cart events yet.</p>
-            ) : (
-              <div style={{ maxHeight: 320, overflowY: "auto" }}>
-                {recentCarts.map((e, i) => (
-                  <div key={`${e.session_id}-${i}`} style={{
-                    display: "flex", justifyContent: "space-between",
-                    alignItems: "flex-start", padding: "9px 0",
-                    borderTop: i > 0 ? `0.5px solid ${C.border}` : "none", fontSize: 13,
-                  }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{ margin: 0, fontWeight: 500, whiteSpace: "nowrap",
-                        overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {e.props?.product_name || "Unknown product"}
-                      </p>
-                      <p style={{ margin: "2px 0 0", fontSize: 11, color: C.muted }}>{e.path}</p>
-                    </div>
-                    <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 12 }}>
-                      {e.props?.product_price > 0 && (
-                        <p style={{ margin: 0, color: C.teal, fontWeight: 600 }}>
-                          ₹{Number(e.props.product_price).toLocaleString("en-IN")}
-                        </p>
-                      )}
-                      <p style={{ margin: "2px 0 0", fontSize: 11, color: C.muted }}>
-                        {new Date(e.ts).toLocaleTimeString("en-IN", {
-                          hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata",
-                        })}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
+          <LiveCartsWidget />
         </div>
 
         <p style={{ marginTop: "2rem", textAlign: "center", fontSize: 12, color: C.muted }}>
@@ -1003,6 +970,10 @@ export default function DashboardPage() {
       return <OverviewPage range={range} />;
     }
 
+    if (currentPage === "orders") {
+      return <OrdersPage />;
+    }
+
     if (currentPage === "customers") {
       return selectedCustomerId ? (
         <CustomerTimeline
@@ -1053,6 +1024,7 @@ export default function DashboardPage() {
           <div style={{ display: "flex", gap: 8, borderLeft: `0.5px solid ${C.border}`, paddingLeft: 16 }}>
             {[
               { id: "overview", label: "Overview" },
+              { id: "orders", label: "Orders" },
               { id: "customers", label: "Customers" },
               { id: "capi", label: "CAPI Testing" },
             ].map((tab) => (

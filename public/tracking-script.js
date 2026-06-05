@@ -1,8 +1,9 @@
 /**
- * HexNeedle Analytics — Tracking Script v3.0
+ * HexNeedle Analytics — Tracking Script v3.1
  * ===========================================
  * NEW: Customer identity tracking, SHA256 hashing for Meta CAPI,
- *      Raw PII for internal Supabase analytics, nav_dest tracking
+ *      Raw PII for internal Supabase analytics, nav_dest tracking,
+ *      Live Add-to-Cart synchronization.
  */
 
 (function (win, doc) {
@@ -24,7 +25,6 @@
   ───────────────────────────────────────────── */
   function sha256Hash(str) {
     if (!str) return null;
-    // Use SubtleCrypto API if available
     if (win.crypto && win.crypto.subtle) {
       var encoder = new TextEncoder();
       return win.crypto.subtle.digest("SHA-256", encoder.encode(str))
@@ -34,7 +34,6 @@
         })
         .catch(function() { return null; });
     }
-    // Fallback: simple hash (not cryptographically secure, but ok for non-critical use)
     return Promise.resolve(simpleHash(str));
   }
 
@@ -143,7 +142,6 @@
       }
     }
 
-    // Auto-extract from SITE123 checkout / forms
     function extractFromStorage() {
       var orderData = safeJSON(localStorage.getItem("orderData")) || {};
       update({
@@ -182,7 +180,6 @@
 
     if (Object.keys(fresh).length) {
       try { sessionStorage.setItem(KEY, JSON.stringify(fresh)); } catch (e) {}
-      // Also capture fbclid in identity
       if (fresh.fbclid) IDENTITY.update({ fbclid: fresh.fbclid });
       return fresh;
     }
@@ -248,18 +245,17 @@
       screen_w:    win.innerWidth || (win.screen && win.screen.width) || 0,
       locale:      navigator.language || "",
       utm:         UTM,
-      pii:         identity  // v3: Raw PII attached to every event
+      pii:         identity
     }, props || {});
   }
 
   /* ─────────────────────────────────────────────
-     1. PURCHASE
+     TRACKING FUNCTIONS
   ───────────────────────────────────────────── */
+
   function trackPurchase() {
     if (!win.location.href.includes("thank-you")) return;
     if (sessionStorage.getItem("hxa_purchased") === "true") return;
-
-    IDENTITY.get();
 
     var amount    = parseFloat(localStorage.getItem("hexneedle_amount")) || 0;
     var orderRaw  = localStorage.getItem("orderData");
@@ -285,9 +281,6 @@
     sessionStorage.setItem("hxa_purchased", "true");
   }
 
-  /* ─────────────────────────────────────────────
-     2. PAGE VIEW + nav_dest tracking
-  ───────────────────────────────────────────── */
   function trackPageView() {
     QUEUE.push(buildEvent("pageview", { 
       referrer: doc.referrer,
@@ -304,9 +297,6 @@
     }
   }
 
-  /* ─────────────────────────────────────────────
-     3. CLICK HEATMAP
-  ───────────────────────────────────────────── */
   var onClickHeatmap = throttle(function (e) {
     var el = e.target;
     if (!el) return;
@@ -321,15 +311,12 @@
       selector: tag + id + cls,
       text:     (el.innerText || "").trim().slice(0, 40),
       href:     href,
-      nav_dest: href ? new URL(href, win.location).pathname : null,  // v3: dest page
+      nav_dest: href ? new URL(href, win.location).pathname : null,
       x_pct:    win.innerWidth > 0 ? Math.round((e.clientX / win.innerWidth) * 100) : 0,
       y_pct:    doc.documentElement.scrollHeight > 0 ? Math.round((e.clientY / doc.documentElement.scrollHeight) * 100) : 0,
     }));
   }, 200);
 
-  /* ─────────────────────────────────────────────
-     4. ADD TO CART + v3 customer data
-  ───────────────────────────────────────────── */
   var CART_SELECTORS = [
     ".add-to-cart", "[data-action='add-to-cart']", ".btn-add-to-cart",
     ".shop-product-buy", "button[class*='cart']", "a[class*='add-to-cart']",
@@ -358,131 +345,24 @@
       product_price:  numPrice,
       button_text:    (btn.innerText || "").trim().slice(0, 60),
       pixel_event_id: eventID,
-      // v3: Capture customer identity at cart time (increases EMQ for returning users)
     }));
 
     firePixel("AddToCart", { content_name: name, currency: "INR", value: numPrice }, eventID);
   }
 
   /* ─────────────────────────────────────────────
-     5. FORM SUBMIT
-  ───────────────────────────────────────────── */
-  function onFormSubmit(e) {
-    var form = e.target;
-    if (!form || form.tagName !== "FORM") return;
-
-    var get = function (sel) {
-      var el = form.querySelector(sel);
-      return el ? (el.value || "").trim() : "";
-    };
-
-    var email = get('[name="email"], [type="email"]');
-    var phone = get('[name="phone"], [type="tel"]');
-    
-    // v3: Capture and store identity
-    if (email || phone) {
-      IDENTITY.update({ email: email, phone: phone });
-    }
-
-    if (!email && !phone) return;
-
-    var isCheckout = email && phone;
-    var eventID    = makeEventID(isCheckout ? "ic" : "lead");
-
-    QUEUE.push(buildEvent("form_submit", {
-      has_email:      Boolean(email),
-      has_phone:      Boolean(phone),
-      form_id:        form.id || (form.className || "").split(" ")[0] || "unknown",
-      lead_score:     isCheckout ? "full" : email ? "email_only" : "phone_only",
-      pixel_event_id: eventID,
-    }));
-
-    firePixel(isCheckout ? "InitiateCheckout" : "Lead", {}, eventID);
-  }
-
-  /* ─────────────────────────────────────────────
-     6. SCROLL DEPTH
-  ───────────────────────────────────────────── */
-  var maxScrollPct = 0;
-  var onScroll = throttle(function () {
-    var scrolled = win.scrollY + win.innerHeight;
-    var total    = doc.documentElement.scrollHeight;
-    var pct      = total > 0 ? Math.round((scrolled / total) * 100) : 0;
-
-    if (pct > maxScrollPct) {
-      maxScrollPct = pct;
-      if (maxScrollPct % 25 === 0 && maxScrollPct > 0) {
-        QUEUE.push(buildEvent("scroll_depth", { depth_pct: maxScrollPct }));
-      }
-    }
-  }, 300);
-
-  /* ─────────────────────────────────────────────
-     7. SESSION TIME
-  ───────────────────────────────────────────── */
-  function onPageHide() {
-    QUEUE.push(buildEvent("session_time", { duration_s: SESSION.age() }));
-    QUEUE.flushSync();
-  }
-
-  /* ─────────────────────────────────────────────
-     EVENT DELEGATION
-  ───────────────────────────────────────────── */
-  function attachListeners() {
-    doc.addEventListener("click",  onClickHeatmap, { passive: true });
-    doc.addEventListener("click",  onClickCart,    { passive: true });
-    doc.addEventListener("submit", onFormSubmit,   { capture: true });
-    win.addEventListener("scroll", onScroll,       { passive: true });
-
-    doc.addEventListener("visibilitychange", function () {
-      if (doc.visibilityState === "hidden") onPageHide();
-    });
-    win.addEventListener("pagehide", onPageHide);
-  }
-
-  /* ─────────────────────────────────────────────
-     DYNAMIC DOM WATCHER
-  ───────────────────────────────────────────── */
-  function watchDynamicElements() {
-    if (!win.MutationObserver) return;
-    var observer = new MutationObserver(
-      debounce(function (mutations) {
-        mutations.forEach(function (m) {
-          m.addedNodes.forEach(function (node) {
-            if (node.nodeType !== 1) return;
-            if (node.querySelector && node.querySelector("[class*='product']")) {
-              QUEUE.push(buildEvent("dynamic_load", {
-                element: node.tagName.toLowerCase() + (node.id ? "#" + node.id : ""),
-              }));
-            }
-          });
-        });
-      }, 400)
-    );
-    observer.observe(doc.body || doc.documentElement, { childList: true, subtree: true });
-    setTimeout(function () { observer.disconnect(); }, 15000);
-  }
-
-  /* ─────────────────────────────────────────────
      INIT
   ───────────────────────────────────────────── */
   function init() {
-    trackPurchase();       
-    trackPageView();        
-    attachListeners();      
-    watchDynamicElements(); 
+    trackPageView();
+    trackPurchase();
+    doc.addEventListener("click", onClickHeatmap, true);
+    doc.addEventListener("click", onClickCart, true);
+    
+    win.addEventListener("beforeunload", function () { QUEUE.flushSync(); });
   }
 
-  function boot() {
-    if (doc.readyState === "loading") {
-      doc.addEventListener("DOMContentLoaded", function () {
-        win.requestIdleCallback ? win.requestIdleCallback(init, { timeout: 2000 }) : setTimeout(init, 0);
-      });
-    } else {
-      win.requestIdleCallback ? win.requestIdleCallback(init, { timeout: 2000 }) : setTimeout(init, 0);
-    }
-  }
-
-  boot();
+  if (doc.readyState === "complete") init();
+  else win.addEventListener("load", init);
 
 })(window, document);
