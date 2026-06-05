@@ -72,6 +72,13 @@ export async function POST(req) {
     const {
       order_number,
       customer_id,
+      customer_email,
+      customer_phone,
+      customer_name,
+      customer_address,
+      customer_city,
+      customer_state,
+      customer_zip,
       revenue,
       currency = "INR",
       items_json = [],
@@ -95,20 +102,28 @@ export async function POST(req) {
     const { data, error } = await supabase
       .from("orders")
       .insert({
-        site_id: "hexneedle",
         order_number,
         customer_id: customer_id || null,
+        customer_email: customer_email || null,
+        customer_phone: customer_phone || null,
+        customer_name: customer_name || null,
+        customer_address: customer_address || null,
+        customer_city: customer_city || null,
+        customer_state: customer_state || null,
+        customer_zip: customer_zip || null,
         revenue: parseFloat(revenue) || 0,
         currency,
-        items_json,
+        items: items_json,
         utm_source: utm_source || null,
         utm_medium: utm_medium || null,
         utm_campaign: utm_campaign || null,
         utm_content: utm_content || null,
         utm_term: utm_term || null,
-        session_id: session_id || null,
+        check_payment: false,
+        check_processing: false,
+        check_ready: false,
+        check_shipped: false,
         notes: notes || null,
-        status: "pending",
       })
       .select("*")
       .single();

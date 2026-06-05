@@ -108,12 +108,10 @@ async function upsertCustomer(event, ip, sessionId) {
     utm_source:           utm.utm_source || null,
     utm_medium:           utm.utm_medium || null,
     utm_campaign:         utm.utm_campaign || null,
-    utm_content:          utm.utm_content || null,        // v3.1: ad.name
-    utm_term:             utm.utm_term || null,           // v3.1: new field
     referrer:             event.referrer || null,
     source:               source,
     fbclid:               pii.fbclid || utm.fbclid || null,
-    data_version:         "V3.1",
+    data_version:         "V3",
   };
 
   if (customerId) {
@@ -370,13 +368,10 @@ function buildProps(e) {
       };
     case "add_to_cart":
       return {
-        product_name:   isString(e.product_name,   200) ? e.product_name   : null,
-        product_price:  isNumber(e.product_price)       ? e.product_price  : null,
-        product_url:    isString(e.product_url,   2000) ? e.product_url    : null,  // v3.1
-        product_image:  isString(e.product_image, 2000) ? e.product_image  : null,  // v3.1
-        button_text:    isString(e.button_text,   100) ? e.button_text    : null,
+        product_name:  isString(e.product_name,  200) ? e.product_name  : null,
+        product_price: isNumber(e.product_price)       ? e.product_price : null,
+        button_text:   isString(e.button_text,   100) ? e.button_text   : null,
         pixel_event_id: isString(e.pixel_event_id, 100) ? e.pixel_event_id : null,
-        utm_content:    isString(e.utm_content,   200) ? e.utm_content    : null,  // v3.1: ad.name
       };
     case "form_submit":
       return {
@@ -415,17 +410,16 @@ async function insertEvent(e) {
     path:         isString(e.path,  500) ? e.path  : null,
     title:        isString(e.title, 500) ? e.title : null,
     ts:           new Date(e.ts).toISOString(),
-    screen_w:     isNumber(e.screen_w) ? e.screen_w : null,
+    screen_w:     isNumber(e.screen_w)    ? e.screen_w    : null,
     session_age:  isNumber(e.session_age) ? e.session_age : null,
-    locale:       isString(e.locale, 20) ? e.locale : null,
-    utm_source:   e.utm?.utm_source ? e.utm.utm_source.slice(0, 100) : null,
-    utm_medium:   e.utm?.utm_medium ? e.utm.utm_medium.slice(0, 100) : null,
-    utm_campaign: e.utm?.utm_campaign ? e.utm.utm_campaign.slice(0, 100) : null,
-    utm_content:  e.utm?.utm_content ? e.utm.utm_content.slice(0, 100) : null,  // v3.1
-    utm_term:     e.utm?.utm_term ? e.utm.utm_term.slice(0, 100) : null,        // v3.1
-    referrer:     isString(e.referrer, 500) ? e.referrer : null,
+    locale:       isString(e.locale,  20) ? e.locale      : null,
+    utm_source:   isString(e.utm?.utm_source,   100) ? e.utm.utm_source   : null,
+    utm_medium:   isString(e.utm?.utm_medium,   100) ? e.utm.utm_medium   : null,
+    utm_campaign: isString(e.utm?.utm_campaign, 100) ? e.utm.utm_campaign : null,
+    referrer:     isString(e.referrer || e.utm?.referrer, 500)
+                    ? (e.referrer || e.utm?.referrer) : null,
     props:        buildProps(e),
-    created_at:   new Date().toISOString(),
+    data_version: "V3",  // v3: Mark all new events
   });
   return error ? error.message : null;
 }
