@@ -157,11 +157,17 @@ export default function OrdersPage() {
   const handleDeleteOrder = async (orderId) => {
     if (!confirm("Are you sure you want to delete this order?")) return;
     try {
-      const { error } = await supabase.from("orders").delete().eq("id", orderId);
-      if (!error) {
+      const response = await fetch(`/api/orders?id=${orderId}`, {
+        method: "DELETE",
+      });
+      const result = await response.json();
+      
+      if (result.success) {
         setOrders(orders.filter((o) => o.id !== orderId));
         setSelectedOrder(null);
         alert("Order deleted successfully!");
+      } else {
+        alert("Error deleting order: " + result.error);
       }
     } catch (err) {
       alert("Error deleting order: " + err.message);
