@@ -59,9 +59,7 @@ function fmtDuration(s) {
 
 function fmtCompact(n) {
   if (!n) return "0";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
-  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
+  return Number(n).toLocaleString("en-IN");
 }
 
 function fmtTime(iso) {
