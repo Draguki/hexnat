@@ -1,9 +1,10 @@
 /**
- * HexNeedle Analytics — Tracking Script v3.1
- * ===========================================
- * NEW: Customer identity tracking, SHA256 hashing for Meta CAPI,
- *      Raw PII for internal Supabase analytics, nav_dest tracking,
- *      Live Add-to-Cart synchronization.
+ * HexNeedle Analytics — Tracking Script v3.1 (Multi-page Fix)
+ * ==========================================================
+ * Features:
+ *   - Enhanced selector logic for multi-page support
+ *   - Robust product name extraction for all shirt types
+ *   - Customer identity tracking & Meta CAPI integration
  */
 
 (function (win, doc) {
@@ -73,15 +74,6 @@
     };
   }
 
-  function debounce(fn, ms) {
-    var timer;
-    return function () {
-      var ctx = this, args = arguments;
-      clearTimeout(timer);
-      timer = setTimeout(function () { fn.apply(ctx, args); }, ms);
-    };
-  }
-
   function safeJSON(str) {
     try { return JSON.parse(str); } catch (e) { return null; }
   }
@@ -123,7 +115,7 @@
   })();
 
   /* ─────────────────────────────────────────────
-     v3 IDENTITY MANAGER (Raw PII for Supabase)
+     IDENTITY MANAGER
   ───────────────────────────────────────────── */
   var IDENTITY = (function () {
     var KEY = PREFIX + "pii";
@@ -155,39 +147,12 @@
 
     return { 
       get: function() { extractFromStorage(); return pii; }, 
-      update: update,
-      clear: function() { pii = {}; try { localStorage.removeItem(KEY); } catch (e) {} }
+      update: update
     };
   })();
 
   /* ─────────────────────────────────────────────
-     UTM CAPTURE
-  ───────────────────────────────────────────── */
-  var UTM = (function () {
-    var KEY    = PREFIX + "utm";
-    var PARAMS = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid"];
-
-    function fromURL() {
-      var p = new URLSearchParams(win.location.search);
-      var obj = {};
-      PARAMS.forEach(function (k) { if (p.get(k)) obj[k] = p.get(k); });
-      if (doc.referrer) obj.referrer = doc.referrer;
-      return obj;
-    }
-
-    var fresh  = fromURL();
-    var stored = safeJSON(sessionStorage.getItem(KEY)) || {};
-
-    if (Object.keys(fresh).length) {
-      try { sessionStorage.setItem(KEY, JSON.stringify(fresh)); } catch (e) {}
-      if (fresh.fbclid) IDENTITY.update({ fbclid: fresh.fbclid });
-      return fresh;
-    }
-    return stored;
-  })();
-
-  /* ─────────────────────────────────────────────
-     EVENT QUEUE + SENDER
+     EVENT QUEUE
   ───────────────────────────────────────────── */
   var QUEUE = (function () {
     var queue = [];
@@ -228,11 +193,7 @@
     };
   })();
 
-  /* ─────────────────────────────────────────────
-     EVENT BUILDER
-  ───────────────────────────────────────────── */
   function buildEvent(type, props) {
-    var identity = IDENTITY.get();
     return Object.assign({
       type:        type,
       site_id:     SITE_ID,
@@ -241,124 +202,62 @@
       path:        win.location.pathname,
       title:       doc.title,
       ts:          Date.now(),
-      session_age: SESSION.age(),
-      screen_w:    win.innerWidth || (win.screen && win.screen.width) || 0,
-      locale:      navigator.language || "",
-      utm:         UTM,
-      pii:         identity
+      pii:         IDENTITY.get()
     }, props || {});
   }
 
   /* ─────────────────────────────────────────────
-     TRACKING FUNCTIONS
+     TRACKING
   ───────────────────────────────────────────── */
-
   function trackPurchase() {
     if (!win.location.href.includes("thank-you")) return;
-    if (sessionStorage.getItem("hxa_purchased") === "true") return;
-
-    var amount    = parseFloat(localStorage.getItem("hexneedle_amount")) || 0;
-    var orderRaw  = localStorage.getItem("orderData");
-    var orderData = orderRaw ? safeJSON(orderRaw) : {};
-
+    var amount = parseFloat(localStorage.getItem("hexneedle_amount")) || 0;
     if (amount <= 0) return;
 
     var eventID = makeEventID("purchase");
-
-    QUEUE.push(buildEvent("purchase", {
-      revenue:        amount,
-      currency:       "INR",
-      order_id:       orderData.orderID   || null,
-      customer_city:  orderData.city      || null,
-      customer_state: orderData.state     || null,
-      cart:           orderData.cart      || null,
-      items_count:    orderData.cart ? orderData.cart.split("|").length : 1,
-      pixel_event_id: eventID,
-    }));
-    QUEUE.flushSync();
-
+    QUEUE.push(buildEvent("purchase", { revenue: amount, currency: "INR", pixel_event_id: eventID }));
     firePixel("Purchase", { value: amount, currency: "INR" }, eventID);
-    sessionStorage.setItem("hxa_purchased", "true");
   }
 
   function trackPageView() {
-    QUEUE.push(buildEvent("pageview", { 
-      referrer: doc.referrer,
-      nav_dest: win.location.pathname
-    }));
-
-    var path = win.location.pathname;
-    if (path.includes("/store/") || path.includes("/product")) {
-      firePixel("ViewContent", {
-        content_name:     doc.title || "",
-        content_category: "Product",
-        currency:         "INR",
-      }, makeEventID("vc"));
+    QUEUE.push(buildEvent("pageview"));
+    if (win.location.pathname.includes("/store/")) {
+      firePixel("ViewContent", { content_name: doc.title, currency: "INR" }, makeEventID("vc"));
     }
   }
-
-  var onClickHeatmap = throttle(function (e) {
-    var el = e.target;
-    if (!el) return;
-    var tag = el.tagName ? el.tagName.toLowerCase() : "";
-    var id  = el.id ? "#" + el.id : "";
-    var cls = el.className && typeof el.className === "string"
-      ? "." + el.className.trim().split(/\s+/).slice(0, 2).join(".") : "";
-
-    var href = el.href || (el.closest && el.closest("a") ? el.closest("a").href : "") || "";
-    
-    QUEUE.push(buildEvent("click", {
-      selector: tag + id + cls,
-      text:     (el.innerText || "").trim().slice(0, 40),
-      href:     href,
-      nav_dest: href ? new URL(href, win.location).pathname : null,
-      x_pct:    win.innerWidth > 0 ? Math.round((e.clientX / win.innerWidth) * 100) : 0,
-      y_pct:    doc.documentElement.scrollHeight > 0 ? Math.round((e.clientY / doc.documentElement.scrollHeight) * 100) : 0,
-    }));
-  }, 200);
-
-  var CART_SELECTORS = [
-    ".add-to-cart", "[data-action='add-to-cart']", ".btn-add-to-cart",
-    ".shop-product-buy", "button[class*='cart']", "a[class*='add-to-cart']",
-    ".btn-buy-now", ".orderButtonPopup", "[aria-label='Add To Cart']",
-  ].join(", ");
 
   function onClickCart(e) {
-    var btn = e.target && e.target.closest && e.target.closest(CART_SELECTORS);
+    var btn = e.target.closest(".btn-buy-now, .orderButtonPopup, .add-to-cart, [data-action='add-to-cart']");
     if (!btn) return;
 
-    var container = btn.closest(".shop-product-item") || btn.closest("[class*='product-item']") || btn.closest("[class*='product']") || btn.parentElement;
-    var name = "", price = "";
+    // 1. Try to find name in the product page H1 first (most reliable for product pages)
+    var name = (doc.querySelector("h1") || doc.querySelector(".product-name") || {}).innerText;
     
-    if (container) {
-      var nameEl  = container.querySelector("[class*='name'], [class*='title'], h2, h3");
-      var priceEl = doc.querySelector(".price-container #productPrice [data-type='price']");
-      name  = nameEl  ? (nameEl.innerText  || "").trim().slice(0, 100) : "";
-      price = priceEl ? priceEl.textContent.trim() : "";
+    // 2. If not found, look in the container (for home page/grid view)
+    if (!name) {
+      var container = btn.closest(".shop-product-item") || btn.closest("[class*='product']");
+      if (container) {
+        var nameEl = container.querySelector("[class*='name'], [class*='title'], h2, h3");
+        name = nameEl ? nameEl.innerText : "";
+      }
     }
 
-    var numPrice = parseFloat(price) || 0;
-    var eventID  = makeEventID("atc");
+    // 3. Fallback
+    name = (name || "Product").trim().slice(0, 100);
 
-    QUEUE.push(buildEvent("add_to_cart", {
-      product_name:   name,
-      product_price:  numPrice,
-      button_text:    (btn.innerText || "").trim().slice(0, 60),
-      pixel_event_id: eventID,
-    }));
+    // Price extraction
+    var priceEl = doc.querySelector(".price-container [data-type='price']") || doc.querySelector("[data-type='price']");
+    var price = priceEl ? parseFloat(priceEl.innerText.replace(/[^\d.]/g, "")) : 0;
 
-    firePixel("AddToCart", { content_name: name, currency: "INR", value: numPrice }, eventID);
+    var eventID = makeEventID("atc");
+    QUEUE.push(buildEvent("add_to_cart", { product_name: name, product_price: price, pixel_event_id: eventID }));
+    firePixel("AddToCart", { content_name: name, currency: "INR", value: price }, eventID);
   }
 
-  /* ─────────────────────────────────────────────
-     INIT
-  ───────────────────────────────────────────── */
   function init() {
     trackPageView();
     trackPurchase();
-    doc.addEventListener("click", onClickHeatmap, true);
     doc.addEventListener("click", onClickCart, true);
-    
     win.addEventListener("beforeunload", function () { QUEUE.flushSync(); });
   }
 
