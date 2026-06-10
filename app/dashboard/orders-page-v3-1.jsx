@@ -1,3 +1,4 @@
+
 // app/dashboard/orders-page-v3-1.jsx (V3.2 Optimized)
 "use client";
 
@@ -61,8 +62,15 @@ export default function OrdersPage() {
     loadOrders();
     const channel = supabase
       .channel("orders_changes")
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => {
-        loadOrders();
+      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, (payload) => {
+        // Realtime update logic
+        if (payload.eventType === "INSERT") {
+          setOrders((prev) => [payload.new, ...prev]);
+        } else if (payload.eventType === "UPDATE") {
+          setOrders((prev) => prev.map((order) => (order.id === payload.old.id ? payload.new : order)));
+        } else if (payload.eventType === "DELETE") {
+          setOrders((prev) => prev.filter((order) => order.id !== payload.old.id));
+        }
       })
       .subscribe();
     
@@ -97,7 +105,6 @@ export default function OrdersPage() {
     setIsSubmitting(true);
 
     try {
-      // Use API for resilient insert and Meta tracking
       const response = await fetch("/api/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -122,7 +129,7 @@ export default function OrdersPage() {
           test_event_code: "",
         });
         alert("Order created successfully!");
-        loadOrders();
+        // No need to call loadOrders() here, realtime subscription will handle it
       } else {
         alert("Error: " + result.error);
       }
@@ -146,8 +153,7 @@ export default function OrdersPage() {
         .single();
 
       if (!error && data) {
-        setOrders(orders.map((o) => (o.id === orderId ? data : o)));
-        if (selectedOrder?.id === orderId) setSelectedOrder(data);
+        // Realtime subscription will update the state, no need to manually map
       }
     } catch (err) {
       alert("Error updating order: " + err.message);
@@ -163,7 +169,7 @@ export default function OrdersPage() {
       const result = await response.json();
       
       if (result.success) {
-        setOrders(orders.filter((o) => o.id !== orderId));
+        // Realtime subscription will update the state, no need to manually filter
         setSelectedOrder(null);
         alert("Order deleted successfully!");
       } else {

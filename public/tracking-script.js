@@ -1,3 +1,4 @@
+
 /**
  * HexNeedle Analytics — Tracking Script v3.2 (Restored ATC)
  * ===========================================
@@ -12,9 +13,21 @@
   "use strict";
 
   /* ─────────────────────────────────────────────
+     META PIXEL INIT
+  ───────────────────────────────────────────── */
+  !function(f,b,e,v,n,t,s)
+  {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+  n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+  if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+  n.queue=[];t=b.createElement(e);t.async=!0;
+  t.src=v;s=b.getElementsByTagName(e)[0];
+  s.parentNode.insertBefore(t,s)}(window, document,'script',
+  'https://connect.facebook.net/en_US/fbevents.js');
+
+  /* ─────────────────────────────────────────────
      CONFIG
   ───────────────────────────────────────────── */
-  var API_ENDPOINT   = "/api/track";
+  var API_ENDPOINT   = "https://hexnat.vercel.app/api/track";
   var SITE_ID        = "hexneedle";
   var BATCH_SIZE     = 10;
   var BATCH_INTERVAL = 5000;
@@ -206,6 +219,17 @@
 
   function trackPageView() {
     QUEUE.push(buildEvent("pageview", { referrer: doc.referrer }));
+    // Meta Pixel ViewContent for product pages
+    if (win.location.pathname.includes("/store/") || win.location.pathname.includes("/product")) {
+      fbq('track', 'ViewContent', {
+        content_name: doc.title,
+        content_category: 'Product Page',
+        currency: 'INR',
+        value: 0 // Cannot reliably get product price on page view without more specific selectors
+      });
+    } else {
+      fbq('track', 'PageView');
+    }
   }
 
   function trackPurchase() {
@@ -227,6 +251,14 @@
     }));
     QUEUE.flushSync();
     sessionStorage.setItem(PREFIX + "purchased", "true");
+
+    // Meta Pixel Purchase event
+    fbq('track', 'Purchase', {
+      value: amount,
+      currency: 'INR',
+      content_ids: [orderData.orderID || ''],
+      content_type: 'product'
+    });
   }
 
   var CART_SELECTORS = [
@@ -259,9 +291,19 @@
       product_price:  numPrice,
       pixel_event_id: eventID
     }));
+
+    // Meta Pixel AddToCart event
+    fbq('track', 'AddToCart', {
+      content_name: name,
+      content_category: 'Product',
+      value: numPrice,
+      currency: 'INR'
+    });
   }
 
   function init() {
+    fbq('set', 'autoConfig', false, PIXEL_ID);
+    fbq('init', PIXEL_ID);
     trackPageView();
     trackPurchase();
     doc.addEventListener("click", onClickCart, true);

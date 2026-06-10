@@ -129,7 +129,7 @@ export async function DELETE(req) {
     if (error) throw error;
 
     return new Response(
-      JSON.stringify({ success: true, message: "Order deleted" }),
+      JSON.stringify({ success: true }),
       { headers: { ...corsHeaders(req), "Content-Type": "application/json" } }
     );
   } catch (err) {

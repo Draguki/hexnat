@@ -399,16 +399,16 @@ function OverviewPage({ range = 30 }) {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
           gap: 12, marginBottom: "1.25rem" }}>
           <MetricCard label="Page Views"
-            value={loading ? "—" : fmtCompact(kpis?.pageviews || 0)}
+            value={loading ? "—" : (kpis?.pageviews || 0).toLocaleString("en-IN")}
             sub={`Last ${range} days`} accent={C.purple} />
           <MetricCard label="Sessions"
-            value={loading ? "—" : fmtCompact(kpis?.sessions || 0)}
+            value={loading ? "—" : (kpis?.sessions || 0).toLocaleString("en-IN")}
             sub="Unique browser sessions" accent={C.teal} />
           <MetricCard label="Add to Cart"
-            value={loading ? "—" : fmtCompact(kpis?.addToCarts || 0)}
+            value={loading ? "—" : (kpis?.addToCarts || 0).toLocaleString("en-IN")}
             sub={`${kpis?.cartRate ?? 0}% of sessions`} accent={C.amber} />
           <MetricCard label="Leads"
-            value={loading ? "—" : fmtCompact(kpis?.formSubmits || 0)}
+            value={loading ? "—" : (kpis?.formSubmits || 0).toLocaleString("en-IN")}
             sub={`${kpis?.leadRate ?? 0}% conversion`} accent={C.blue} />
           <MetricCard label="Revenue"
             value={loading ? "—" : `₹${(kpis?.revenue || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`}
@@ -525,7 +525,7 @@ function OverviewPage({ range = 30 }) {
             )}
           </Card>
 
-          <LiveCartsWidget />
+          <LiveCartsWidget recentCarts={recentCarts} />
         </div>
 
         <p style={{ marginTop: "2rem", textAlign: "center", fontSize: 12, color: C.muted }}>
