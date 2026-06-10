@@ -16,6 +16,7 @@ import {
 } from "recharts";
 import LiveCartsWidget from "./live-carts-widget";
 import OrdersPage from "./orders-page-v3-1";
+import MetaEventsLog from "./meta-events/page";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -262,7 +263,7 @@ function useDashboardData(rangeDays) {
         // 7. Recent add-to-cart
         supabase
           .from("events")
-          .select("ts, props, path, session_id")
+          .select("id, ts, props, path, session_id")
           .eq("type", "add_to_cart")
           .gte("ts", since)
           .order("ts", { ascending: false })
@@ -365,145 +366,98 @@ function useDashboardData(rangeDays) {
         recentCarts: recentCartsData || [],
       });
 
-    } catch (err) {
-      setState((s) => ({ ...s, loading: false, error: err.message }));
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: e.message }));
     }
   }, [rangeDays]);
 
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 30_000);
-    return () => clearInterval(t);
-  }, [load]);
-
-  return { ...state, refetch: load };
+  useEffect(() => { load(); }, [load]);
+  return { ...state, reload: load };
 }
 
+// ── Pages ──────────────────────────────────────────────────────────────────
+function OverviewPage({ range }) {
+  const { loading, error, kpis, daily, topPages, sources, recentCarts } = useDashboardData(range);
 
-function OverviewPage({ range = 30 }) {
-  const { loading, error, kpis, daily, topPages, sources, recentCarts, refetch } =
-    useDashboardData(range);
-
-  const funnelMax = kpis?.sessions || 1;
+  if (loading) return <div style={{ padding: "4rem", textAlign: "center", color: C.muted }}>Loading analytics...</div>;
+  if (error)   return <div style={{ padding: "4rem", textAlign: "center", color: C.error }}>Error: {error}</div>;
 
   return (
-    <div style={{ maxWidth: 1200, margin: "0 auto", padding: "1.5rem 1.5rem 4rem" }}>
-        {error && (
-          <div style={{ marginBottom: "1rem", padding: "10px 16px", background: "#FAECE7",
-            borderRadius: 8, fontSize: 13, color: C.coral, border: `0.5px solid ${C.coral}` }}>
-            ⚠ {error}
-          </div>
-        )}
-
-        {/* ── KPI CARDS ─────────────────────────────────────────── */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-          gap: 12, marginBottom: "1.25rem" }}>
-          <MetricCard label="Page Views"
-            value={loading ? "—" : fmtCompact(kpis?.pageviews || 0)}
-            sub={`Last ${range} days`} accent={C.purple} />
-          <MetricCard label="Sessions"
-            value={loading ? "—" : fmtCompact(kpis?.sessions || 0)}
-            sub="Unique browser sessions" accent={C.teal} />
-          <MetricCard label="Add to Cart"
-            value={loading ? "—" : fmtCompact(kpis?.addToCarts || 0)}
-            sub={`${kpis?.cartRate ?? 0}% of sessions`} accent={C.amber} />
-          <MetricCard label="Leads"
-            value={loading ? "—" : fmtCompact(kpis?.formSubmits || 0)}
-            sub={`${kpis?.leadRate ?? 0}% conversion`} accent={C.blue} />
-          <MetricCard label="Revenue"
-            value={loading ? "—" : `₹${fmtCompact(kpis?.revenue || 0)}`}
-            sub={`${kpis?.orders ?? 0} orders · ${kpis?.convRate ?? 0}% conv`}
-            accent={C.teal} />
-          <MetricCard label="Avg Session"
-            value={loading ? "—" : fmtDuration(kpis?.avgSessionS || 0)}
-            sub="Time on site" accent={C.coral} />
+    <div style={{ animation: "fadeInUp 0.4s ease" }}>
+        {/* ── KPI GRID ────────────────────────────────────────────── */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <MetricCard label="Total Revenue" value={`₹${fmtCompact(kpis.revenue)}`} sub={`${kpis.orders} orders`} accent={C.purple} />
+          <MetricCard label="Sessions" value={fmtCompact(kpis.sessions)} sub={`${kpis.pageviews} views`} accent={C.blue} />
+          <MetricCard label="Cart Rate" value={`${kpis.cartRate}%`} sub={`${kpis.addToCarts} adds`} accent={C.amber} />
+          <MetricCard label="Conversion" value={`${kpis.convRate}%`} sub="Session to Order" accent={C.teal} />
         </div>
 
-        {/* ── TRAFFIC CHART ─────────────────────────────────────── */}
-        <Card style={{ marginBottom: "1.25rem" }}>
-          <SectionHead title="Traffic over time"
-            sub={`Sessions and page views — last ${range} days`} />
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={daily} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-              <defs>
-                <linearGradient id="gSessions" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor={C.purple} stopOpacity={0.2} />
-                  <stop offset="95%" stopColor={C.purple} stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="gPageviews" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor={C.teal} stopOpacity={0.15} />
-                  <stop offset="95%" stopColor={C.teal} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#ebebea" />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: C.gray, fontFamily: FONT }}
-                tickLine={false} axisLine={false} interval="preserveStartEnd" />
-              <YAxis tick={{ fontSize: 11, fill: C.gray, fontFamily: FONT }}
-                tickLine={false} axisLine={false} />
-              <Tooltip content={<ChartTooltip />} />
-              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12, fontFamily: FONT }} />
-              <Area type="monotone" dataKey="Sessions" stroke={C.purple}
-                fill="url(#gSessions)" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-              <Area type="monotone" dataKey="Pageviews" stroke={C.teal}
-                fill="url(#gPageviews)" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </Card>
-
-        {/* ── FUNNEL + SOURCES ──────────────────────────────────── */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-          gap: 12, marginBottom: "1.25rem" }}>
-
+        {/* ── CHARTS ──────────────────────────────────────────────── */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))", gap: 12, marginBottom: 12 }}>
           <Card>
-            <SectionHead title="Conversion funnel" sub="Sessions → cart → checkout → purchase" />
-            <FunnelRow label="Total sessions" value={kpis?.sessions || 0}
-              max={funnelMax} color={C.purple} />
-            <FunnelRow label="Add to cart" value={kpis?.addToCarts || 0}
-              max={funnelMax} color={C.amber} convRate={kpis?.cartRate} />
-            <FunnelRow label="Checkout" value={kpis?.formSubmits || 0}
-              max={funnelMax} color={C.blue} convRate={kpis?.leadRate} />
-            <FunnelRow label="Purchases (PayU confirmed)" value={kpis?.orders || 0}
-              max={funnelMax} color={C.teal} convRate={kpis?.convRate} />
+            <SectionHead title="Traffic over time" sub="Daily sessions and pageviews" />
+            <div style={{ height: 260, marginTop: 20 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={daily}>
+                  <defs>
+                    <linearGradient id="colorSessions" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={C.purple} stopOpacity={0.1}/>
+                      <stop offset="95%" stopColor={C.purple} stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={C.border} />
+                  <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: C.gray }} dy={10} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: C.gray }} />
+                  <Tooltip content={<ChartTooltip />} />
+                  <Area type="monotone" dataKey="Sessions" stroke={C.purple} strokeWidth={2} fillOpacity={1} fill="url(#colorSessions)" />
+                  <Area type="monotone" dataKey="Pageviews" stroke={C.blue} strokeWidth={2} fill="transparent" strokeDasharray="5 5" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
           </Card>
 
           <Card>
-            <SectionHead title="Traffic sources" sub="Sessions by UTM source" />
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={sources} layout="vertical"
-                margin={{ left: 0, right: 16, top: 0, bottom: 0 }}>
-                <XAxis type="number" tick={{ fontSize: 11, fill: C.gray, fontFamily: FONT }}
-                  tickLine={false} axisLine={false} />
-                <YAxis dataKey="source" type="category" width={80}
-                  tick={{ fontSize: 11, fill: C.gray, fontFamily: FONT }}
-                  tickLine={false} axisLine={false} />
-                <Tooltip content={<ChartTooltip />} />
-                <Bar dataKey="Sessions" fill={C.purple} radius={[0, 4, 4, 0]} barSize={16} />
-              </BarChart>
-            </ResponsiveContainer>
+            <SectionHead title="Conversion Funnel" sub="User journey performance" />
+            <div style={{ marginTop: 24 }}>
+              <FunnelRow label="Sessions" value={kpis.sessions} max={kpis.sessions} color={C.blue} />
+              <FunnelRow label="Add to Cart" value={kpis.addToCarts} max={kpis.sessions} color={C.amber} convRate={kpis.cartRate} />
+              <FunnelRow label="Purchase" value={kpis.orders} max={kpis.sessions} color={C.teal} convRate={kpis.convRate} />
+            </div>
           </Card>
         </div>
 
-        {/* ── EVENTS BY DAY ─────────────────────────────────────── */}
-        <Card style={{ marginBottom: "1.25rem" }}>
-          <SectionHead title="Events by day" sub="Pageviews · add to carts" />
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={daily} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#ebebea" />
-              <XAxis dataKey="label" tick={{ fontSize: 11, fill: C.gray, fontFamily: FONT }}
-                tickLine={false} axisLine={false} interval="preserveStartEnd" />
-              <YAxis tick={{ fontSize: 11, fill: C.gray, fontFamily: FONT }}
-                tickLine={false} axisLine={false} />
-              <Tooltip content={<ChartTooltip />} />
-              <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12, fontFamily: FONT }} />
-              <Bar dataKey="Pageviews"   fill={C.purple} radius={[3,3,0,0]} barSize={range > 30 ? 4 : 10} />
-              <Bar dataKey="Add to Cart" fill={C.amber}  radius={[3,3,0,0]} barSize={range > 30 ? 4 : 10} />
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
+        {/* ── LIVE & RECENT CARTS ──────────────────────────── */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(350px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <LiveCartsWidget />
+          
+          <Card>
+            <SectionHead title="Recent Add-to-Cart Events" sub="Raw tracking logs" />
+            <div style={{ maxHeight: 400, overflowY: "auto" }}>
+              {recentCarts.length === 0 ? (
+                <p style={{ fontSize: 13, color: C.muted }}>No recent events found.</p>
+              ) : (
+                recentCarts.map((atc) => (
+                  <div key={atc.id} style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    padding: "10px 0", borderTop: `0.5px solid ${C.border}`
+                  }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>{atc.props?.product_name || 'Product'}</span>
+                      <span style={{ fontSize: 11, color: C.muted }}>{fmtTime(atc.ts)}</span>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: C.purple }}>₹{atc.props?.product_price || 0}</div>
+                      <div style={{ fontSize: 10, color: C.teal }}>Event Received</div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </Card>
+        </div>
 
-        {/* ── TOP PAGES + RECENT CARTS ──────────────────────────── */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12 }}>
-
+        {/* ── TOP PAGES ──────────────────────────── */}
+        <div style={{ marginTop: 12 }}>
           <Card>
             <SectionHead title="Top pages" sub="Most viewed paths" />
             {topPages.length === 0 ? (
@@ -524,8 +478,6 @@ function OverviewPage({ range = 30 }) {
               </>
             )}
           </Card>
-
-          <LiveCartsWidget />
         </div>
 
         <p style={{ marginTop: "2rem", textAlign: "center", fontSize: 12, color: C.muted }}>
@@ -820,7 +772,7 @@ function CAPITestingPage() {
       const { data } = await supabase
         .from("capi_events_sent")
         .select("*")
-        .order("sent_at", { ascending: false })
+        .order("created_at", { ascending: false })
         .limit(20);
 
       if (data) setCapiEvents(data);
@@ -889,7 +841,7 @@ function CAPITestingPage() {
                   </span>
                 </div>
                 <div style={{ fontSize: 11, color: C.muted }}>
-                  {fmtTime(e.sent_at)} · {e.event_id?.slice(0, 16)}...
+                  {fmtTime(e.created_at)} · {e.event_id?.slice(0, 16)}...
                 </div>
               </div>
             ))}
@@ -989,6 +941,10 @@ export default function DashboardPage() {
       return <CAPITestingPage />;
     }
 
+    if (currentPage === "meta-events") {
+      return <MetaEventsLog />;
+    }
+
     return <OverviewPage range={range} />;
   };
 
@@ -1027,6 +983,7 @@ export default function DashboardPage() {
               { id: "orders", label: "Orders" },
               { id: "customers", label: "Customers" },
               { id: "capi", label: "CAPI Testing" },
+              { id: "meta-events", label: "Meta Events Log" },
             ].map((tab) => (
               <button
                 key={tab.id}
