@@ -411,7 +411,7 @@ function OverviewPage({ range = 30 }) {
             value={loading ? "—" : fmtCompact(kpis?.formSubmits || 0)}
             sub={`${kpis?.leadRate ?? 0}% conversion`} accent={C.blue} />
           <MetricCard label="Revenue"
-            value={loading ? "—" : `₹${fmtCompact(kpis?.revenue || 0)}`}
+            value={loading ? "—" : `₹${(kpis?.revenue || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`}
             sub={`${kpis?.orders ?? 0} orders · ${kpis?.convRate ?? 0}% conv`}
             accent={C.teal} />
           <MetricCard label="Avg Session"

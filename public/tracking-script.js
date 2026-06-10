@@ -1,10 +1,10 @@
 /**
- * HexNeedle Analytics — Tracking Script v3.2 (Optimized)
+ * HexNeedle Analytics — Tracking Script v3.2 (Restored ATC)
  * ===========================================
  * Features: 
+ *   - Restored working ATC selectors for Site123
  *   - Site123 orderData synchronization
  *   - Meta Click ID (_fbc) and Browser ID (_fbp) capture
- *   - Robust Add-to-Cart tracking for Site123
  *   - Non-blocking server-side event dispatch
  */
 
@@ -14,7 +14,7 @@
   /* ─────────────────────────────────────────────
      CONFIG
   ───────────────────────────────────────────── */
-  var API_ENDPOINT   = "/api/track"; // Use relative path for stability
+  var API_ENDPOINT   = "/api/track";
   var SITE_ID        = "hexneedle";
   var BATCH_SIZE     = 10;
   var BATCH_INTERVAL = 5000;
@@ -98,7 +98,6 @@
     }
 
     function extractFromStorage() {
-      // Pull from Site123's orderData if available
       var orderData = safeJSON(localStorage.getItem("orderData")) || {};
       var fbclid = new URLSearchParams(win.location.search).get("fbclid");
       
@@ -210,14 +209,14 @@
   }
 
   function trackPurchase() {
-    if (!win.location.href.includes("thank-you") && !win.location.href.includes("confirmation")) return;
+    if (!win.location.href.includes("thank-you")) return;
     if (sessionStorage.getItem(PREFIX + "purchased") === "true") return;
 
     var amount    = parseFloat(localStorage.getItem("hexneedle_amount")) || 0;
     var orderRaw  = localStorage.getItem("orderData");
     var orderData = orderRaw ? safeJSON(orderRaw) : {};
 
-    if (amount <= 0 && !orderData.orderID) return;
+    if (amount <= 0) return;
 
     var eventID = makeEventID("purchase");
     QUEUE.push(buildEvent("purchase", {
@@ -240,14 +239,17 @@
     var btn = e.target && e.target.closest && e.target.closest(CART_SELECTORS);
     if (!btn) return;
 
-    var container = btn.closest(".shop-product-item") || btn.closest("[class*='product-item']") || btn.closest("[class*='product']") || doc;
+    var container = btn.closest(".shop-product-item") || btn.closest("[class*='product-item']") || btn.closest("[class*='product']") || btn.parentElement;
     var name = "", price = "";
     
-    var nameEl  = container.querySelector("[class*='name'], [class*='title'], h2, h3");
-    var priceEl = container.querySelector("[data-type='price'], .price, .product-price");
-    
-    name  = nameEl  ? (nameEl.innerText || "").trim().slice(0, 100) : "Product";
-    price = priceEl ? priceEl.innerText.replace(/[^\d.]/g, '') : "0";
+    if (container) {
+      var nameEl  = container.querySelector("[class*='name'], [class*='title'], h2, h3");
+      // Use the specific selector from working version
+      var priceEl = doc.querySelector(".price-container #productPrice [data-type='price']") || container.querySelector("[data-type='price'], .price, .product-price");
+      
+      name  = nameEl  ? (nameEl.innerText || "").trim().slice(0, 100) : "Product";
+      price = priceEl ? priceEl.textContent.trim().replace(/[^\d.]/g, '') : "0";
+    }
 
     var numPrice = parseFloat(price) || 0;
     var eventID  = makeEventID("atc");
