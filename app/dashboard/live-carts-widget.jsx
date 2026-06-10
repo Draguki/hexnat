@@ -1,13 +1,12 @@
-
-// app/dashboard/live-carts-widget.jsx (V3.2 Optimized)
-// ─────────────────────────────────────────────────────────────────────────
-// Live Add-to-Carts Widget
-// Shows real-time cart contents with full specifications
-// ─────────────────────────────────────────────────────────────────────────
-
 "use client";
 
 import { useState, useEffect } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+);
 
 const C = {
   purple: "#7F77DD",
@@ -19,7 +18,54 @@ const C = {
   surface: "#ffffff",
 };
 
-export default function LiveCartsWidget({ recentCarts }) {
+export default function LiveCartsWidget() {
+  const [carts, setCarts] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadCarts();
+    
+    // Realtime subscription to active_carts
+    const channel = supabase
+      .channel("active_carts_changes")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "active_carts" },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setCarts((prev) => [payload.new, ...prev].slice(0, 15));
+          } else if (payload.eventType === "UPDATE") {
+            setCarts((prev) =>
+              prev.map((cart) => (cart.id === payload.new.id ? payload.new : cart))
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const loadCarts = async () => {
+    try {
+      const { data, error } = await supabase
+        .from("active_carts")
+        .select("*")
+        .order("last_updated", { ascending: false })
+        .limit(15);
+
+      if (!error && data) {
+        setCarts(data);
+      }
+      setLoading(false);
+    } catch (err) {
+      console.error("Error loading carts:", err);
+      setLoading(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -31,45 +77,125 @@ export default function LiveCartsWidget({ recentCarts }) {
       }}
     >
       <div style={{ marginBottom: "1rem" }}>
-        <h2 style={{ margin: 0, fontSize: 15, fontWeight: 500 }}>Recent Add-to-Carts</h2>
+        <h2 style={{ margin: 0, fontSize: 15, fontWeight: 500 }}>
+          Recent Add-to-Carts
+        </h2>
         <p style={{ margin: "2px 0 0", fontSize: 12, color: C.gray }}>
-          Latest add-to-cart events
+          Latest items added to cart
         </p>
       </div>
 
-      {recentCarts.length === 0 ? (
-        <p style={{ fontSize: 13, color: C.muted }}>No recent add-to-cart events yet.</p>
+      {loading ? (
+        <p style={{ fontSize: 13, color: C.muted }}>Loading...</p>
+      ) : carts.length === 0 ? (
+        <p style={{ fontSize: 13, color: C.muted }}>No cart events yet.</p>
       ) : (
         <div style={{ maxHeight: 400, overflowY: "auto" }}>
-          {recentCarts.map((cart, idx) => (
-            <div
-              key={cart.ts + idx} // Using ts + idx for unique key as multiple carts can have same ts
-              style={{
-                padding: "12px 0",
-                borderTop: idx > 0 ? `0.5px solid ${C.border}` : "none",
-                fontSize: 13,
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                <div>
-                  <p style={{ margin: 0, fontWeight: 600, color: "#1a1a18" }}>
-                    {cart.props?.product_name || "Product"}
-                  </p>
-                  <p style={{ margin: "2px 0 0", fontSize: 11, color: C.muted }}>
-                    Session: {cart.session_id?.slice(0, 8)}...
-                  </p>
+          {carts.map((cart, idx) => {
+            const items = cart.items || [];
+            return (
+              <div
+                key={cart.id}
+                style={{
+                  padding: "12px 0",
+                  borderTop: idx > 0 ? `0.5px solid ${C.border}` : "none",
+                  fontSize: 13,
+                }}
+              >
+                {/* Cart header with session and total */}
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    marginBottom: 8,
+                  }}
+                >
+                  <div>
+                    <p style={{ margin: 0, fontWeight: 600, color: "#1a1a18" }}>
+                      Session: {cart.session_id?.slice(0, 8)}...
+                    </p>
+                    <p style={{ margin: "2px 0 0", fontSize: 11, color: C.muted }}>
+                      {cart.total_items} item{cart.total_items !== 1 ? "s" : ""} in cart
+                    </p>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <p style={{ margin: 0, color: C.teal, fontWeight: 600, fontSize: 14 }}>
+                      ₹{Number(cart.total_revenue || 0).toLocaleString("en-IN", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </p>
+                    <p style={{ margin: "2px 0 0", fontSize: 11, color: C.muted }}>
+                      {new Date(cart.last_updated).toLocaleTimeString("en-IN", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        timeZone: "Asia/Kolkata",
+                      })}
+                    </p>
+                  </div>
                 </div>
-                <div style={{ textAlign: "right" }}>
-                  <p style={{ margin: 0, color: C.teal, fontWeight: 600 }}>
-                    ₹{Number(cart.props?.product_price).toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-                  </p>
-                  <p style={{ margin: "2px 0 0", fontSize: 11, color: C.muted }}>
-                    {new Date(cart.ts).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Kolkata" })}
-                  </p>
-                </div>
+
+                {/* Items list */}
+                {items.length > 0 && (
+                  <div
+                    style={{
+                      marginTop: 8,
+                      paddingTop: 8,
+                      borderTop: `0.5px solid ${C.border}`,
+                      fontSize: 12,
+                    }}
+                  >
+                    {items.map((item, itemIdx) => (
+                      <div
+                        key={itemIdx}
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          paddingBottom: 6,
+                          marginBottom: itemIdx < items.length - 1 ? 6 : 0,
+                          borderBottom:
+                            itemIdx < items.length - 1
+                              ? `0.5px solid ${C.border}`
+                              : "none",
+                        }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p
+                            style={{
+                              margin: 0,
+                              fontWeight: 500,
+                              color: "#1a1a18",
+                              wordBreak: "break-word",
+                              whiteSpace: "normal",
+                            }}
+                          >
+                            {item.name || "Unknown"}
+                          </p>
+                          <p
+                            style={{
+                              margin: "2px 0 0",
+                              fontSize: 11,
+                              color: C.muted,
+                            }}
+                          >
+                            Qty: {item.qty || 1}
+                          </p>
+                        </div>
+                        <div style={{ textAlign: "right", marginLeft: 12, flexShrink: 0 }}>
+                          <p style={{ margin: 0, color: C.teal, fontWeight: 600 }}>
+                            ₹{Number(item.price || 0).toLocaleString("en-IN", {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
