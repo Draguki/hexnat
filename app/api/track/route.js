@@ -1,19 +1,10 @@
-// app/api/track/route.js (V3)
+// app/api/track/route.js (V3.2 Optimized)
 // ─────────────────────────────────────────────────────────────────────────
 // ANALYTICS INGEST + CUSTOMER PROFILING + META CONVERSIONS API (CAPI)
-//
-// v3 Features:
-//   1. Upserts customers table from raw PII
-//   2. Logs customer_timeline for journey analysis
-//   3. Hashes PII (SHA256) before sending to Meta CAPI
-//   4. Logs all CAPI calls for debugging
-//
-// Environment variables required:
-//   SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGIN, META_CAPI_TOKEN
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
-import { createHmac } from "crypto";
+import { createHash } from "crypto";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -23,595 +14,218 @@ const supabase = createClient(
 
 const META_PIXEL_ID   = "4415595052018024";
 const META_CAPI_URL   = `https://graph.facebook.com/v20.0/${META_PIXEL_ID}/events`;
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://www.hexneedle.com";
 
 // ─────────────────────────────────────────────────────────────────────────
-// UTILITIES
+// NORMALIZATION & HASHING (Meta Standards)
 // ─────────────────────────────────────────────────────────────────────────
 
-// SHA256 hashing for Meta CAPI
-function sha256(str) {
-  if (!str) return null;
-  try {
-    return createHmac("sha256", "")
-      .update(str.toLowerCase().trim())
-      .digest("hex");
-  } catch (e) {
-    console.error("[HXA] SHA256 error:", e.message);
-    return null;
-  }
+function normalizeEmail(em) {
+  if (!em) return null;
+  return em.toLowerCase().trim();
 }
 
-// Derive traffic source from UTM or referrer
+function normalizePhone(ph) {
+  if (!ph) return null;
+  let clean = ph.replace(/[^\d]/g, ''); // Remove symbols
+  clean = clean.replace(/^0+/, '');     // Remove leading zeros
+  if (clean.length === 10) clean = "91" + clean; // Default to India if 10 digits
+  return clean;
+}
+
+function normalizeString(str) {
+  if (!str) return null;
+  return str.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+}
+
+function sha256(str) {
+  if (!str) return null;
+  return createHash("sha256").update(str).digest("hex");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────
+
 function deriveSource(utm, referrer) {
-  if (utm?.utm_source) {
-    if (utm.utm_source.includes("meta") || utm.utm_source.includes("facebook")) return "meta";
-    if (utm.utm_source.includes("google")) return "google";
-    return "utm:" + utm.utm_source;
-  }
+  if (utm?.utm_source) return "utm:" + utm.utm_source;
   if (referrer) {
-    if (referrer.includes("instagram") || referrer.includes("facebook")) return "meta";
+    if (referrer.includes("instagram")) return "instagram";
+    if (referrer.includes("facebook")) return "facebook";
     if (referrer.includes("google")) return "google";
-    if (referrer.includes("whatsapp")) return "whatsapp";
     return "referrer";
   }
   return "direct";
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// CUSTOMER MANAGEMENT
+// CORE LOGIC
 // ─────────────────────────────────────────────────────────────────────────
 
-async function upsertCustomer(event, ip, sessionId) {
+async function upsertCustomer(event, sessionId) {
   const pii = event.pii || {};
-  const utm = event.utm || {};
+  const email = normalizeEmail(pii.email);
+  const phone = normalizePhone(pii.phone);
   
-  // Minimal customer identifier: email or phone
-  if (!pii.email && !pii.phone) return null;
+  if (!email && !phone) return null;
 
-  const customerEmail = pii.email ? pii.email.toLowerCase().trim() : null;
-  const customerPhone = pii.phone ? pii.phone.trim() : null;
-
-  // Find existing customer or create one
-  let customerId = null;
-  if (customerEmail) {
-    const { data } = await supabase
-      .from("customers")
-      .select("id")
-      .eq("email", customerEmail)
-      .limit(1)
-      .single();
-    if (data) customerId = data.id;
-  } else if (customerPhone) {
-    const { data } = await supabase
-      .from("customers")
-      .select("id")
-      .eq("phone", customerPhone)
-      .limit(1)
-      .single();
-    if (data) customerId = data.id;
-  }
-
-  // Upsert customer record
-  const source = deriveSource(utm, event.referrer);
   const customerData = {
-    site_id:              "hexneedle",
-    email:                customerEmail,
-    phone:                customerPhone,
-    name:                 pii.name || null,
-    city:                 pii.city || null,
-    state:                pii.state || null,
-    first_session_id:     sessionId,
-    last_session_id:      sessionId,
-    last_visit:           new Date(event.ts).toISOString(),
-    last_visit_path:      event.path || null,
-    utm_source:           utm.utm_source || null,
-    utm_medium:           utm.utm_medium || null,
-    utm_campaign:         utm.utm_campaign || null,
-    referrer:             event.referrer || null,
-    source:               source,
-    fbclid:               pii.fbclid || utm.fbclid || null,
-    data_version:         "V3",
+    site_id: "hexneedle",
+    email,
+    phone,
+    name: pii.name || null,
+    city: pii.city || null,
+    state: pii.state || null,
+    last_session_id: sessionId,
+    last_visit: new Date(event.ts).toISOString(),
+    fbclid: pii.fbclid || event.utm?.fbclid || null,
+    data_version: "V3.2"
   };
 
-  if (customerId) {
-    // Update existing customer
-    const { data, error } = await supabase
-      .from("customers")
-      .update({
-        ...customerData,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", customerId)
-      .select("id")
-      .single();
+  const { data, error } = await supabase
+    .from("customers")
+    .upsert(customerData, { onConflict: email ? "email" : "phone" })
+    .select("id")
+    .single();
 
-    if (error) {
-      console.error("[HXA] Customer update error:", error.message);
-      return null;
-    }
-    return data?.id || customerId;
-  } else {
-    // Create new customer
-    const { data, error } = await supabase
-      .from("customers")
-      .insert({
-        ...customerData,
-        first_visit: new Date(event.ts).toISOString(),
-      })
-      .select("id")
-      .single();
-
-    if (error) {
-      console.error("[HXA] Customer insert error:", error.message);
-      return null;
-    }
-    return data?.id || null;
-  }
+  return data?.id || null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// CUSTOMER TIMELINE
-// ─────────────────────────────────────────────────────────────────────────
-
-async function insertCustomerTimeline(customerId, event) {
-  if (!customerId || !event.type) return null;
-
-  // Build event label from type + data
-  let eventLabel = null;
-  switch (event.type) {
-    case "pageview":
-      eventLabel = `Viewed ${event.title || event.path || "page"}`;
-      break;
-    case "add_to_cart":
-      const prodName = event.props?.product_name || "Unknown product";
-      const price = event.props?.product_price;
-      eventLabel = `Added to Cart: ${prodName}${price ? " (₹" + price + ")" : ""}`;
-      break;
-    case "form_submit":
-      eventLabel = event.props?.lead_score === "full" ? "Initiated Checkout" : "Submitted Lead Form";
-      break;
-    case "purchase":
-      const rev = event.props?.revenue;
-      eventLabel = `Purchase ₹${rev || 0}`;
-      break;
-    default:
-      eventLabel = event.type.toUpperCase();
-  }
-
-  const { error } = await supabase
-    .from("customer_timeline")
-    .insert({
-      site_id:      "hexneedle",
-      customer_id:  customerId,
-      session_id:   event.session_id,
-      event_type:   event.type,
-      event_label:  eventLabel,
-      path:         event.path || null,
-      title:        event.title || null,
-      page_destination: event.props?.nav_dest || null,
-      props:        event.props || null,
-      ts:           new Date(event.ts).toISOString(),
-      data_version: "V3",
-    });
-
-  if (error) {
-    console.error("[HXA] Timeline insert error:", error.message);
-    return null;
-  }
-  return true;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// META CAPI (v3: with SHA256 hashing)
-// ─────────────────────────────────────────────────────────────────────────
-
-async function sendCAPI(event, ip, userAgent, customerId) {
+async function sendCAPI(event, ip, userAgent, testCode) {
   const token = process.env.META_CAPI_TOKEN;
   if (!token) return;
 
-  let metaEventName = null;
-  let customData    = {};
-  let userData      = {
-    client_ip_address: ip || null,
-    client_user_agent: userAgent || null,
+  const pii = event.pii || {};
+  const userData = {
+    client_ip_address: ip,
+    client_user_agent: userAgent,
+    em: sha256(normalizeEmail(pii.email)) ? [sha256(normalizeEmail(pii.email))] : undefined,
+    ph: sha256(normalizePhone(pii.phone)) ? [sha256(normalizePhone(pii.phone))] : undefined,
+    fn: sha256(normalizeString(pii.name?.split(' ')[0])) ? [sha256(normalizeString(pii.name?.split(' ')[0]))] : undefined,
+    ln: sha256(normalizeString(pii.name?.split(' ').slice(1).join(''))) ? [sha256(normalizeString(pii.name?.split(' ').slice(1).join('')))] : undefined,
+    ct: sha256(normalizeString(pii.city)) ? [sha256(normalizeString(pii.city))] : undefined,
+    st: sha256(normalizeString(pii.state)) ? [sha256(normalizeString(pii.state))] : undefined,
+    country: [sha256("in")], // Default to India
+    fbc: pii.fbc || null,
+    fbp: pii.fbp || null,
+    external_id: sha256(event.order_id || event.props?.order_id) || undefined
   };
 
-  // v3: Hash PII before sending to Meta
-  if (event.pii) {
-    if (event.pii.email) {
-      const emailHash = await sha256Hash(event.pii.email);
-      if (emailHash) userData.em = [emailHash];
-    }
-    if (event.pii.phone) {
-      const phoneHash = await sha256Hash(event.pii.phone);
-      if (phoneHash) userData.ph = [phoneHash];
-    }
-  }
+  let metaEventName = null;
+  let customData = { currency: "INR" };
 
   switch (event.type) {
     case "purchase":
       metaEventName = "Purchase";
-      customData = {
-        currency: "INR",
-        value:    isNumber(event.revenue) ? event.revenue : (event.props?.revenue || 0),
-      };
+      customData.value = parseFloat(event.revenue || event.props?.revenue || 0);
       break;
-
     case "add_to_cart":
       metaEventName = "AddToCart";
-      customData = {
-        currency:     "INR",
-        value:        isNumber(event.product_price) ? event.product_price : 0,
-        content_name: isString(event.product_name, 200) ? event.product_name : "",
-      };
+      customData.value = parseFloat(event.product_price || event.props?.product_price || 0);
+      customData.content_name = event.product_name || event.props?.product_name || "";
       break;
-
-    case "form_submit":
-      metaEventName = event.props?.lead_score === "full" ? "InitiateCheckout" : "Lead";
-      break;
-
     case "pageview":
-      if (event.path && (event.path.includes("/store/") || event.path.includes("/product"))) {
+      if (event.path?.includes("/store/") || event.path?.includes("/product")) {
         metaEventName = "ViewContent";
-        customData    = { content_name: isString(event.title, 200) ? event.title : "" };
+        customData.content_name = event.title || "";
+      } else {
+        metaEventName = "PageView";
       }
       break;
-
-    default:
-      return;
+    default: return;
   }
-
-  if (!metaEventName) return;
-
-  const eventID = event.props?.pixel_event_id ||
-                  `${event.type}_${event.ts}_${event.session_id?.slice(0, 8)}`;
 
   const payload = {
     data: [{
-      event_name:       metaEventName,
-      event_time:       Math.floor(event.ts / 1000),
-      event_id:         eventID,
-      event_source_url: isString(event.url, 2000) ? event.url : null,
-      action_source:    "website",
-      user_data:        Object.keys(userData).length ? userData : undefined,
-      custom_data:      Object.keys(customData).length ? customData : undefined,
+      event_name: metaEventName,
+      event_time: Math.floor(event.ts / 1000),
+      event_id: event.pixel_event_id || event.props?.pixel_event_id || `ev_${Date.now()}`,
+      event_source_url: event.url,
+      action_source: "website",
+      user_data: userData,
+      custom_data: customData
     }],
-    access_token: token,
+    test_event_code: testCode || undefined
   };
 
   try {
-    const res = await fetch(META_CAPI_URL, {
-      method:  "POST",
+    const res = await fetch(`${META_CAPI_URL}?access_token=${token}`, {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify(payload),
+      body: JSON.stringify(payload)
     });
     const result = await res.json();
+    
+    // Log for audit
+    await supabase.from("capi_events_sent").insert({
+      event_name: metaEventName,
+      event_id: payload.data[0].event_id,
+      payload,
+      meta_response: result,
+      http_status: res.status
+    }).catch(() => {});
 
-    // Log CAPI call for audit
-    await supabase
-      .from("capi_events_sent")
-      .insert({
-        site_id:             "hexneedle",
-        event_name:          metaEventName,
-        event_id:            eventID,
-        customer_email_hash: userData.em?.[0] || null,
-        customer_phone_hash: userData.ph?.[0] || null,
-        payload:             payload,
-        meta_response:       result,
-        http_status:         res.status,
-        error_msg:           !res.ok ? JSON.stringify(result).slice(0, 500) : null,
-      })
-      .catch((e) => console.error("[HXA CAPI Log] Error:", e.message));
-
-    if (!res.ok) {
-      console.error("[HXA CAPI] Meta error:", JSON.stringify(result).slice(0, 200));
-    } else {
-      console.log(`[HXA CAPI] ✅ ${metaEventName} sent | eventID: ${eventID}`);
-    }
-  } catch (err) {
-    console.error("[HXA CAPI] Fetch failed:", err.message);
-  }
-}
-
-// Async SHA256 hashing (modern approach)
-async function sha256Hash(str) {
-  if (!str) return null;
-  try {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(str.toLowerCase().trim());
-    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map((b) => ("0" + b.toString(16)).slice(-2)).join("");
   } catch (e) {
-    console.error("[HXA] Async SHA256 error:", e.message);
-    // Fallback to sync hash
-    return sha256(str);
+    console.error("[CAPI Error]", e.message);
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// CORE HANDLERS (existing, kept for backward compatibility)
-// ─────────────────────────────────────────────────────────────────────────
-
-const ALLOWED_EVENT_TYPES = new Set([
-  "pageview", "click", "add_to_cart", "form_submit",
-  "session_time", "scroll_depth", "dynamic_load", "purchase",
-]);
-
-function isString(v, max = 500) {
-  return typeof v === "string" && v.length > 0 && v.length <= max;
-}
-function isNumber(v) {
-  return typeof v === "number" && isFinite(v);
-}
-function validateEvent(e) {
-  if (!e || typeof e !== "object")       return false;
-  if (!ALLOWED_EVENT_TYPES.has(e.type)) return false;
-  if (!isString(e.session_id, 64))      return false;
-  if (!isString(e.site_id, 64))         return false;
-  if (!isString(e.url, 2000))           return false;
-  if (!isNumber(e.ts))                  return false;
-  return true;
-}
-
-function buildProps(e) {
-  switch (e.type) {
-    case "click":
-      return {
-        selector: isString(e.selector, 200) ? e.selector : null,
-        text:     isString(e.text,     100) ? e.text     : null,
-        href:     isString(e.href,     500) ? e.href     : null,
-        nav_dest: isString(e.nav_dest, 500) ? e.nav_dest : null,  // v3
-        x_pct:    isNumber(e.x_pct)         ? e.x_pct   : null,
-        y_pct:    isNumber(e.y_pct)         ? e.y_pct   : null,
-      };
-    case "add_to_cart":
-      return {
-        product_name:  isString(e.product_name || e.props?.product_name, 200) ? (e.product_name || e.props?.product_name) : null,
-        product_price: isNumber(e.product_price || e.props?.product_price) ? (e.product_price || e.props?.product_price) : null,
-        button_text:   isString(e.button_text || e.props?.button_text, 100) ? (e.button_text || e.props?.button_text) : null,
-        pixel_event_id: isString(e.pixel_event_id || e.props?.pixel_event_id, 100) ? (e.pixel_event_id || e.props?.pixel_event_id) : null,
-      };
-    case "form_submit":
-      return {
-        has_email:  Boolean(e.has_email),
-        has_phone:  Boolean(e.has_phone),
-        form_id:    isString(e.form_id,    100) ? e.form_id    : null,
-        lead_score: isString(e.lead_score,  20) ? e.lead_score : null,
-        pixel_event_id: isString(e.pixel_event_id, 100) ? e.pixel_event_id : null,
-      };
-    case "session_time":
-      return { duration_s: isNumber(e.duration_s) ? Math.round(e.duration_s) : null };
-    case "scroll_depth":
-      return { depth_pct: isNumber(e.depth_pct) ? e.depth_pct : null };
-    case "purchase":
-      return {
-        revenue:        isNumber(e.revenue)                ? e.revenue        : null,
-        currency:       isString(e.currency,          10)  ? e.currency       : "INR",
-        order_id:       isString(e.order_id,         100)  ? e.order_id       : null,
-        customer_city:  isString(e.customer_city,    100)  ? e.customer_city  : null,
-        customer_state: isString(e.customer_state,   100)  ? e.customer_state : null,
-        cart:           isString(e.cart,            2000)  ? e.cart           : null,
-        items_count:    isNumber(e.items_count)             ? e.items_count    : null,
-        pixel_event_id: isString(e.pixel_event_id,  100)   ? e.pixel_event_id : null,
-      };
-    default:
-      return null;
-  }
-}
-
-async function insertEvent(e) {
-  const { error } = await supabase.from("events").insert({
-    session_id:   e.session_id,
-    site_id:      e.site_id,
-    type:         e.type,
-    url:          e.url?.slice(0, 2000),
-    path:         isString(e.path,  500) ? e.path  : null,
-    title:        isString(e.title, 500) ? e.title : null,
-    ts:           new Date(e.ts).toISOString(),
-    screen_w:     isNumber(e.screen_w)    ? e.screen_w    : null,
-    session_age:  isNumber(e.session_age) ? e.session_age : null,
-    locale:       isString(e.locale,  20) ? e.locale      : null,
-    utm_source:   isString(e.utm?.utm_source,   100) ? e.utm.utm_source   : null,
-    utm_medium:   isString(e.utm?.utm_medium,   100) ? e.utm.utm_medium   : null,
-    utm_campaign: isString(e.utm?.utm_campaign, 100) ? e.utm.utm_campaign : null,
-    referrer:     isString(e.referrer || e.utm?.referrer, 500)
-                    ? (e.referrer || e.utm?.referrer) : null,
-    props:        buildProps(e),
-    data_version: "V3",  // v3: Mark all new events
-  });
-  return error ? error.message : null;
-}
-
-async function upsertSession(e) {
-  const { error } = await supabase.from("sessions").upsert(
-    {
-      id:           e.session_id,
-      site_id:      e.site_id,
-      first_seen:   new Date(e.ts).toISOString(),
-      last_seen:    new Date(e.ts).toISOString(),
-      utm_source:   isString(e.utm?.utm_source,   100) ? e.utm.utm_source   : null,
-      utm_medium:   isString(e.utm?.utm_medium,   100) ? e.utm.utm_medium   : null,
-      utm_campaign: isString(e.utm?.utm_campaign, 100) ? e.utm.utm_campaign : null,
-      referrer:     isString(e.utm?.referrer,     500) ? e.utm.referrer      : null,
-      locale:       isString(e.locale,             20) ? e.locale            : null,
-      screen_w:     isNumber(e.screen_w)               ? e.screen_w          : null,
-      data_version: "V3",  // v3: Mark all new sessions
-    },
-    { onConflict: "id", ignoreDuplicates: false }
-  );
-  if (error && error.code !== "23505") return error.message;
-  await supabase
-    .from("sessions")
-    .update({ last_seen: new Date(e.ts).toISOString() })
-    .eq("id", e.session_id)
-    .lt("last_seen", new Date(e.ts).toISOString());
-  return null;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// CORS
-// ─────────────────────────────────────────────────────────────────────────
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin":      ALLOWED_ORIGIN,
-    "Access-Control-Allow-Methods":     "POST, OPTIONS",
-    "Access-Control-Allow-Headers":     "Content-Type",
-    "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Max-Age":           "600",
+export async function POST(req) {
+  const headers = {
+    "Access-Control-Allow-Origin": req.headers.get("origin") || "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
   };
-}
 
-export async function OPTIONS() {
-  return new Response(null, { status: 200, headers: corsHeaders() });
-}
+  if (req.method === "OPTIONS") return new Response(null, { headers });
 
-// ─────────────────────────────────────────────────────────────────────────
-// RATE LIMITING
-// ─────────────────────────────────────────────────────────────────────────
-const rateMap = new Map();
-const RATE_LIMIT     = 300;
-const RATE_WINDOW_MS = 60 * 1000;
+  try {
+    const body = await req.json();
+    const events = Array.isArray(body.events) ? body.events : [body];
+    const ip = req.headers.get("x-forwarded-for")?.split(',')[0] || "127.0.0.1";
+    const ua = req.headers.get("user-agent") || "";
 
-function isRateLimited(ip) {
-  const now = Date.now();
-  let r = rateMap.get(ip) || { count: 0, reset: now + RATE_WINDOW_MS };
-  if (now > r.reset) r = { count: 0, reset: now + RATE_WINDOW_MS };
-  r.count++;
-  rateMap.set(ip, r);
-  if (rateMap.size > 10_000) {
-    for (const [k, v] of rateMap) { if (now > v.reset) rateMap.delete(k); }
-  }
-  return r.count > RATE_LIMIT;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// POST HANDLER (v3)
-// ─────────────────────────────────────────────────────────────────────────
-export async function POST(request) {
-  const headers = corsHeaders();
-
-  // Origin check
-  const origin = request.headers.get("origin") || "";
-  if (origin && origin !== ALLOWED_ORIGIN) {
-    return new Response(JSON.stringify({ error: "Origin not allowed" }), {
-      status: 403, headers: { ...headers, "Content-Type": "application/json" },
-    });
-  }
-
-  // Rate limit
-  const ip =
-    request.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
-    request.headers.get("x-real-ip") ||
-    "unknown";
-
-  if (isRateLimited(ip)) {
-    return new Response(JSON.stringify({ error: "Rate limit exceeded" }), {
-      status: 429, headers: { ...headers, "Content-Type": "application/json" },
-    });
-  }
-
-  const userAgent = request.headers.get("user-agent") || "";
-
-  // Parse body
-  let body;
-  try { body = await request.json(); }
-  catch {
-    return new Response(JSON.stringify({ error: "Invalid JSON" }), {
-      status: 400, headers: { ...headers, "Content-Type": "application/json" },
-    });
-  }
-
-  if (!Array.isArray(body?.events) || !body.events.length) {
-    return new Response(JSON.stringify({ error: "events[] array required" }), {
-      status: 400, headers: { ...headers, "Content-Type": "application/json" },
-    });
-  }
-
-  const batch   = body.events.slice(0, 50);
-  const results = { accepted: 0, rejected: 0, db_errors: [] };
-
-  await Promise.allSettled(
-    batch.map(async (event) => {
-      if (!validateEvent(event)) { results.rejected++; return; }
-
-      // v3: Get or create customer from PII
-      const customerId = await upsertCustomer(event, ip, event.session_id);
-
-      // v3: Log customer timeline
-      if (customerId) {
-        await insertCustomerTimeline(customerId, event);
+    for (const event of events) {
+      // 1. Deduplication Check (for Purchase)
+      if (event.type === "purchase" && event.order_id) {
+        const { data: existing } = await supabase
+          .from("events")
+          .select("id")
+          .eq("type", "purchase")
+          .filter("props->>order_id", "eq", event.order_id)
+          .limit(1);
+        if (existing?.length) continue; // Skip duplicate revenue
       }
 
-      // v3.1: Update active_carts for add_to_cart events
-      let cartPromise = Promise.resolve();
-      if (event.type === "add_to_cart") {
-        cartPromise = (async () => {
-          try {
-            const { data: existingCart } = await supabase
-              .from("active_carts")
-              .select("items, total_items, total_revenue")
-              .eq("session_id", event.session_id)
-              .single();
-
-            const newItem = {
-              name: event.product_name || event.props?.product_name || "Unknown",
-              price: parseFloat(event.product_price || event.props?.product_price || 0),
-              qty: 1,
-              added_at: new Date(event.ts).toISOString()
-            };
-
-            const items = existingCart?.items ? [...existingCart.items, newItem] : [newItem];
-            const total_items = (existingCart?.total_items || 0) + 1;
-            const total_revenue = (parseFloat(existingCart?.total_revenue || 0)) + newItem.price;
-
-            await supabase.from("active_carts").upsert({
-              session_id: event.session_id,
-              customer_id: customerId,
-              items,
-              total_items,
-              total_revenue,
-              utm_source: event.utm?.utm_source || null,
-              utm_medium: event.utm?.utm_medium || null,
-              utm_campaign: event.utm?.utm_campaign || null,
-              last_updated: new Date(event.ts).toISOString(),
-            }, { onConflict: "session_id" });
-          } catch (e) {
-            console.error("[HXA API] Cart update error:", e.message);
-          }
-        })();
+      // 2. Customer & Timeline
+      const cid = await upsertCustomer(event, event.session_id);
+      if (cid) {
+        await supabase.from("customer_timeline").insert({
+          customer_id: cid,
+          event_type: event.type,
+          event_label: event.type === "purchase" ? `Purchase ₹${event.revenue}` : event.type,
+          path: event.path,
+          ts: new Date(event.ts).toISOString(),
+          props: event.props || event
+        }).catch(() => {});
       }
 
-      // All writes in parallel — CAPI failure never blocks
-      const [evtErr, sesErr] = await Promise.all([
-        insertEvent(event),
-        upsertSession(event),
-        cartPromise,
-        sendCAPI(event, ip, userAgent, customerId).catch((e) =>
-          console.error("[HXA CAPI] Unhandled:", e.message)
-        ),
-      ]);
+      // 3. Log Event
+      await supabase.from("events").insert({
+        session_id: event.session_id,
+        site_id: event.site_id,
+        type: event.type,
+        path: event.path,
+        url: event.url,
+        ts: new Date(event.ts).toISOString(),
+        props: event.props || event
+      }).catch(() => {});
 
-      if (evtErr || sesErr) {
-        results.rejected++;
-        if (evtErr) results.db_errors.push(`event: ${evtErr}`);
-        if (sesErr) results.db_errors.push(`session: ${sesErr}`);
-        console.error("[HXA API] DB error:", { evtErr, sesErr, type: event.type });
-      } else {
-        results.accepted++;
-      }
-    })
-  );
+      // 4. Meta CAPI
+      sendCAPI(event, ip, ua, body.test_event_code);
+    }
 
-  return new Response(
-    JSON.stringify({
-      ok:       true,
-      accepted: results.accepted,
-      rejected: results.rejected,
-      ...(process.env.NODE_ENV !== "production" && results.db_errors.length
-        ? { db_errors: results.db_errors.slice(0, 5) } : {}),
-    }),
-    { status: 200, headers: { ...headers, "Content-Type": "application/json" } }
-  );
+    return new Response(JSON.stringify({ ok: true }), { headers });
+  } catch (e) {
+    return new Response(JSON.stringify({ error: e.message }), { status: 500, headers });
+  }
 }

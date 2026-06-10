@@ -98,11 +98,7 @@ export default function LiveCartsWidget() {
                     ₹{Number(cart.total_revenue).toLocaleString("en-IN")}
                   </p>
                   <p style={{ margin: "2px 0 0", fontSize: 11, color: C.muted }}>
-                    {new Date(cart.last_updated).toLocaleTimeString("en-IN", {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      timeZone: "Asia/Kolkata",
-                    })}
+                    {new Date(cart.last_updated).toLocaleDateString("en-IN", { month: 'short', day: 'numeric' })} {new Date(cart.last_updated).toLocaleTimeString("en-IN", { hour: '2-digit', minute: '2-digit' })}
                   </p>
                 </div>
               </div>
