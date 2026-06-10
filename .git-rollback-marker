@@ -1,0 +1,6 @@
+This branch preserves the V3.1 stable release.
+Commit: 7fae3b583aaf983d09b95314132f441529053e00
+Date: 2026-06-05T09:21:53Z
+Message: Update dashboard to V3.1 and fix add-to-cart visibility
+
+Safe to merge back to main if V3.2 changes cause issues.
