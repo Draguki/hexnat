@@ -441,7 +441,7 @@ function OverviewPage({ range }) {
                   }}>
                     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                       <span style={{ fontSize: 13, fontWeight: 600 }}>{atc.props?.product_name || 'Product'}</span>
-                      <span style={{ fontSize: 11, color: C.muted }}>{fmtTime(atc.ts)}</span>
+                      <span style={{ fontSize: 11, color: C.muted }}>{new Date(atc.ts).toLocaleDateString("en-IN", { day: 'numeric', month: 'short' })} · {fmtTime(atc.ts)}</span>
                     </div>
                     <div style={{ textAlign: "right" }}>
                       <div style={{ fontSize: 14, fontWeight: 700, color: C.purple }}>₹{atc.props?.product_price || 0}</div>

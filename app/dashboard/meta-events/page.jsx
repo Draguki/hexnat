@@ -181,7 +181,7 @@ export default function MetaEventsLog() {
                       <td className="px-8 py-5 whitespace-nowrap">
                         <div className="flex items-center gap-2 text-xs font-mono text-gray-500">
                           <Clock className="w-3 h-3" />
-                          {new Date(event.ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          {new Date(event.ts).toLocaleDateString("en-IN", { day: 'numeric', month: 'short' })} · {new Date(event.ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                         </div>
                       </td>
                       <td className="px-8 py-5">
