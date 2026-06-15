@@ -212,6 +212,7 @@ function useDashboardData(rangeDays) {
         { data: sessionsData,    error: sessionsErr     },
         { data: sessionTimeData, error: stErr           },
         { data: purchaseData,    error: purchaseErr     },
+        { data: manualOrdersData, error: moErr          },
         { data: topPagesData,    error: tpErr           },
         { data: sourcesData,     error: srcErr          },
         { data: recentCartsData, error: rcErr           },
@@ -237,12 +238,16 @@ function useDashboardData(rangeDays) {
           .gte("ts", since)
           .not("props", "is", null),
 
-        // 4. Purchase events — revenue lives in events table, type = "purchase"
+        // 4. Purchase events AND Manual Orders
         supabase
           .from("events")
           .select("props")
           .eq("type", "purchase")
           .gte("ts", since),
+        supabase
+          .from("orders")
+          .select("total_amount")
+          .gte("created_at", since),
 
         // 5. Top pages
         supabase
@@ -269,7 +274,7 @@ function useDashboardData(rangeDays) {
       ]);
 
       // Surface non-fatal errors
-      const errs = [eventsErr, sessionsErr, stErr, purchaseErr, tpErr, srcErr, rcErr]
+      const errs = [eventsErr, sessionsErr, stErr, purchaseErr, moErr, tpErr, srcErr, rcErr]
         .filter(Boolean).map((e) => e.message);
       if (errs.length) console.warn("[HXA] Partial errors:", errs);
 
@@ -287,13 +292,22 @@ function useDashboardData(rangeDays) {
         ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
         : 0;
 
-      // Revenue from purchase events
+      // Revenue from purchase events AND Manual Orders
       const purchases = purchaseData || [];
-      const revenue   = purchases.reduce((sum, e) => {
+      const manualOrders = manualOrdersData || [];
+      
+      const purchaseRevenue = purchases.reduce((sum, e) => {
         const r = parseFloat(e.props?.revenue);
         return sum + (isNaN(r) ? 0 : r);
       }, 0);
-      const orders = purchases.length;
+      
+      const manualRevenue = manualOrders.reduce((sum, o) => {
+        const r = parseFloat(o.total_amount);
+        return sum + (isNaN(r) ? 0 : r);
+      }, 0);
+
+      const revenue = purchaseRevenue + manualRevenue;
+      const orders = purchases.length + manualOrders.length;
 
       const cartRate = totalSessions > 0 ? Math.round((addToCarts  / totalSessions) * 100) : 0;
       const leadRate = totalSessions > 0 ? Math.round((formSubmits / totalSessions) * 100) : 0;
