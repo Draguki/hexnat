@@ -53,12 +53,37 @@
   /* ─────────────────────────────────────────────
      META PIXEL HELPER
   ───────────────────────────────────────────── */
+  function initPixel() {
+    if (typeof win.fbq === "function") return;
+    var f = win.fbq = function() {
+      f.callMethod ? f.callMethod.apply(f, arguments) : f.queue.push(arguments);
+    };
+    if (!win._fbq) win._fbq = f;
+    f.push = f;
+    f.loaded = !0;
+    f.version = '2.0';
+    f.queue = [];
+    var t = doc.createElement("script");
+    t.async = !0;
+    t.src = "https://connect.facebook.net/en_US/fbevents.js";
+    var s = doc.getElementsByTagName("script")[0];
+    s.parentNode.insertBefore(t, s);
+    fbq('init', PIXEL_ID);
+  }
+
   function firePixel(eventName, params, eventID) {
-    if (typeof win.fbq !== "function") return;
     var options = eventID ? { eventID: eventID } : {};
     try {
-      win.fbq("trackSingle", PIXEL_ID, eventName, params || {}, options);
-    } catch (e) {}
+      if (typeof win.fbq === "function") {
+        win.fbq("trackSingle", PIXEL_ID, eventName, params || {}, options);
+      } else {
+        // If fbq is still not found, try to initialize it and queue the event
+        initPixel();
+        win.fbq("trackSingle", PIXEL_ID, eventName, params || {}, options);
+      }
+    } catch (e) {
+      console.error("[HXA] firePixel error:", e.message);
+    }
   }
 
   function makeEventID(prefix) {
