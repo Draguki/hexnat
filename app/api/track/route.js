@@ -1,15 +1,12 @@
-// app/api/track/route.js (V3)
+// app/api/track/route.js (V3.3)
 // ─────────────────────────────────────────────────────────────────────────
 // ANALYTICS INGEST + CUSTOMER PROFILING + META CONVERSIONS API (CAPI)
 //
-// v3 Features:
-//   1. Upserts customers table from raw PII
-//   2. Logs customer_timeline for journey analysis
-//   3. Hashes PII (SHA256) before sending to Meta CAPI
-//   4. Logs all CAPI calls for debugging
-//
-// Environment variables required:
-//   SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGIN, META_CAPI_TOKEN
+// v3.3 Features:
+//   1. Full Meta CAPI Advanced Matching (fn, ln, ct, st, zp, country, external_id)
+//   2. Deduplication support with pixel_event_id
+//   3. Support for fbp, fbc parameters
+//   4. Enhanced custom_data for Purchase, AddToCart, ViewContent
 // ─────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -42,6 +39,21 @@ function sha256(str) {
   }
 }
 
+// Async SHA256 hashing (modern approach)
+async function sha256Hash(str) {
+  if (!str) return null;
+  try {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(str.toLowerCase().trim());
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => ("0" + b.toString(16)).slice(-2)).join("");
+  } catch (e) {
+    console.error("[HXA] Async SHA256 error:", e.message);
+    return sha256(str);
+  }
+}
+
 // Derive traffic source from UTM or referrer
 function deriveSource(utm, referrer) {
   if (utm?.utm_source) {
@@ -58,6 +70,13 @@ function deriveSource(utm, referrer) {
   return "direct";
 }
 
+function isString(v, max = 500) {
+  return typeof v === "string" && v.length > 0 && v.length <= max;
+}
+function isNumber(v) {
+  return typeof v === "number" && isFinite(v);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // CUSTOMER MANAGEMENT
 // ─────────────────────────────────────────────────────────────────────────
@@ -66,13 +85,11 @@ async function upsertCustomer(event, ip, sessionId) {
   const pii = event.pii || {};
   const utm = event.utm || {};
   
-  // Minimal customer identifier: email or phone
   if (!pii.email && !pii.phone) return null;
 
   const customerEmail = pii.email ? pii.email.toLowerCase().trim() : null;
   const customerPhone = pii.phone ? pii.phone.trim() : null;
 
-  // Find existing customer or create one
   let customerId = null;
   if (customerEmail) {
     const { data } = await supabase
@@ -92,7 +109,6 @@ async function upsertCustomer(event, ip, sessionId) {
     if (data) customerId = data.id;
   }
 
-  // Upsert customer record
   const source = deriveSource(utm, event.referrer);
   const customerData = {
     site_id:              "hexneedle",
@@ -111,11 +127,10 @@ async function upsertCustomer(event, ip, sessionId) {
     referrer:             event.referrer || null,
     source:               source,
     fbclid:               pii.fbclid || utm.fbclid || null,
-    data_version:         "V3",
+    data_version:         "V3.3",
   };
 
   if (customerId) {
-    // Update existing customer
     const { data, error } = await supabase
       .from("customers")
       .update({
@@ -132,7 +147,6 @@ async function upsertCustomer(event, ip, sessionId) {
     }
     return data?.id || customerId;
   } else {
-    // Create new customer
     const { data, error } = await supabase
       .from("customers")
       .insert({
@@ -157,22 +171,24 @@ async function upsertCustomer(event, ip, sessionId) {
 async function insertCustomerTimeline(customerId, event) {
   if (!customerId || !event.type) return null;
 
-  // Build event label from type + data
   let eventLabel = null;
   switch (event.type) {
     case "pageview":
       eventLabel = `Viewed ${event.title || event.path || "page"}`;
       break;
+    case "view_content":
+      eventLabel = `Viewed Content: ${event.title || event.path || "page"}`;
+      break;
     case "add_to_cart":
-      const prodName = event.props?.product_name || "Unknown product";
-      const price = event.props?.product_price;
+      const prodName = event.product_name || event.props?.product_name || "Unknown product";
+      const price = event.product_price || event.props?.product_price;
       eventLabel = `Added to Cart: ${prodName}${price ? " (₹" + price + ")" : ""}`;
       break;
     case "form_submit":
       eventLabel = event.props?.lead_score === "full" ? "Initiated Checkout" : "Submitted Lead Form";
       break;
     case "purchase":
-      const rev = event.props?.revenue;
+      const rev = event.revenue || event.props?.revenue;
       eventLabel = `Purchase ₹${rev || 0}`;
       break;
     default:
@@ -192,7 +208,7 @@ async function insertCustomerTimeline(customerId, event) {
       page_destination: event.props?.nav_dest || null,
       props:        event.props || null,
       ts:           new Date(event.ts).toISOString(),
-      data_version: "V3",
+      data_version: "V3.3",
     });
 
   if (error) {
@@ -203,10 +219,10 @@ async function insertCustomerTimeline(customerId, event) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// META CAPI (v3: with SHA256 hashing)
+// META CAPI (v3.3)
 // ─────────────────────────────────────────────────────────────────────────
 
-async function sendCAPI(event, ip, userAgent, customerId) {
+async function sendCAPI(event, ip, userAgent) {
   const token = process.env.META_CAPI_TOKEN;
   if (!token) return;
 
@@ -217,17 +233,27 @@ async function sendCAPI(event, ip, userAgent, customerId) {
     client_user_agent: userAgent || null,
   };
 
-  // v3: Hash PII before sending to Meta
-  if (event.pii) {
-    if (event.pii.email) {
-      const emailHash = await sha256Hash(event.pii.email);
-      if (emailHash) userData.em = [emailHash];
-    }
-    if (event.pii.phone) {
-      const phoneHash = await sha256Hash(event.pii.phone);
-      if (phoneHash) userData.ph = [phoneHash];
-    }
-  }
+  const pii = event.pii || {};
+
+  // Hashing helper for CAPI
+  const hashField = async (val) => {
+    if (!val) return null;
+    return await sha256Hash(val.toString().toLowerCase().trim());
+  };
+
+  // User Data (Advanced Matching)
+  if (pii.email) userData.em = [await hashField(pii.email)];
+  if (pii.phone) userData.ph = [await hashField(pii.phone)];
+  if (pii.fn)    userData.fn = [await hashField(pii.fn)];
+  if (pii.ln)    userData.ln = [await hashField(pii.ln)];
+  if (pii.city)  userData.ct = [await hashField(pii.city)];
+  if (pii.state) userData.st = [await hashField(pii.state)];
+  if (pii.zip)   userData.zp = [await hashField(pii.zip)];
+  if (pii.country) userData.country = [await hashField(pii.country)];
+  
+  if (pii.external_id) userData.external_id = pii.external_id;
+  if (pii.fbp) userData.fbp = pii.fbp;
+  if (pii.fbc) userData.fbc = pii.fbc;
 
   switch (event.type) {
     case "purchase":
@@ -235,15 +261,19 @@ async function sendCAPI(event, ip, userAgent, customerId) {
       customData = {
         currency: "INR",
         value:    isNumber(event.revenue) ? event.revenue : (event.props?.revenue || 0),
+        order_id: event.order_id || event.props?.order_id || null,
       };
       break;
 
     case "add_to_cart":
       metaEventName = "AddToCart";
+      const atcName = event.product_name || event.props?.product_name || "";
       customData = {
         currency:     "INR",
-        value:        isNumber(event.product_price) ? event.product_price : 0,
-        content_name: isString(event.product_name, 200) ? event.product_name : "",
+        value:        isNumber(event.product_price) ? event.product_price : (event.props?.product_price || 0),
+        content_ids:  atcName ? [atcName] : [],
+        content_type: "product",
+        content_name: atcName,
       };
       break;
 
@@ -251,10 +281,15 @@ async function sendCAPI(event, ip, userAgent, customerId) {
       metaEventName = event.props?.lead_score === "full" ? "InitiateCheckout" : "Lead";
       break;
 
+    case "view_content":
     case "pageview":
-      if (event.path && (event.path.includes("/store/") || event.path.includes("/product"))) {
+      if (event.type === "view_content" || (event.path && (event.path.includes("/store/") || event.path.includes("/product")))) {
         metaEventName = "ViewContent";
-        customData    = { content_name: isString(event.title, 200) ? event.title : "" };
+        customData = {
+          content_ids:  [event.path || ""],
+          content_type: "product",
+          content_name: isString(event.title, 200) ? event.title : "",
+        };
       }
       break;
 
@@ -264,7 +299,7 @@ async function sendCAPI(event, ip, userAgent, customerId) {
 
   if (!metaEventName) return;
 
-  const eventID = event.props?.pixel_event_id ||
+  const eventID = event.pixel_event_id || event.props?.pixel_event_id ||
                   `${event.type}_${event.ts}_${event.session_id?.slice(0, 8)}`;
 
   const payload = {
@@ -273,6 +308,7 @@ async function sendCAPI(event, ip, userAgent, customerId) {
       event_time:       Math.floor(event.ts / 1000),
       event_id:         eventID,
       event_source_url: isString(event.url, 2000) ? event.url : null,
+      referrer_url:     event.utm?.referrer || event.referrer || null,
       action_source:    "website",
       user_data:        Object.keys(userData).length ? userData : undefined,
       custom_data:      Object.keys(customData).length ? customData : undefined,
@@ -288,7 +324,6 @@ async function sendCAPI(event, ip, userAgent, customerId) {
     });
     const result = await res.json();
 
-    // Log CAPI call for audit
     await supabase
       .from("capi_events_sent")
       .insert({
@@ -314,37 +349,15 @@ async function sendCAPI(event, ip, userAgent, customerId) {
   }
 }
 
-// Async SHA256 hashing (modern approach)
-async function sha256Hash(str) {
-  if (!str) return null;
-  try {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(str.toLowerCase().trim());
-    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map((b) => ("0" + b.toString(16)).slice(-2)).join("");
-  } catch (e) {
-    console.error("[HXA] Async SHA256 error:", e.message);
-    // Fallback to sync hash
-    return sha256(str);
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────────────
-// CORE HANDLERS (existing, kept for backward compatibility)
+// CORE HANDLERS
 // ─────────────────────────────────────────────────────────────────────────
 
 const ALLOWED_EVENT_TYPES = new Set([
   "pageview", "click", "add_to_cart", "form_submit",
-  "session_time", "scroll_depth", "dynamic_load", "purchase",
+  "session_time", "scroll_depth", "dynamic_load", "purchase", "view_content"
 ]);
 
-function isString(v, max = 500) {
-  return typeof v === "string" && v.length > 0 && v.length <= max;
-}
-function isNumber(v) {
-  return typeof v === "number" && isFinite(v);
-}
 function validateEvent(e) {
   if (!e || typeof e !== "object")       return false;
   if (!ALLOWED_EVENT_TYPES.has(e.type)) return false;
@@ -362,7 +375,7 @@ function buildProps(e) {
         selector: isString(e.selector, 200) ? e.selector : null,
         text:     isString(e.text,     100) ? e.text     : null,
         href:     isString(e.href,     500) ? e.href     : null,
-        nav_dest: isString(e.nav_dest, 500) ? e.nav_dest : null,  // v3
+        nav_dest: isString(e.nav_dest, 500) ? e.nav_dest : null,
         x_pct:    isNumber(e.x_pct)         ? e.x_pct   : null,
         y_pct:    isNumber(e.y_pct)         ? e.y_pct   : null,
       };
@@ -381,10 +394,6 @@ function buildProps(e) {
         lead_score: isString(e.lead_score,  20) ? e.lead_score : null,
         pixel_event_id: isString(e.pixel_event_id, 100) ? e.pixel_event_id : null,
       };
-    case "session_time":
-      return { duration_s: isNumber(e.duration_s) ? Math.round(e.duration_s) : null };
-    case "scroll_depth":
-      return { depth_pct: isNumber(e.depth_pct) ? e.depth_pct : null };
     case "purchase":
       return {
         revenue:        isNumber(e.revenue)                ? e.revenue        : null,
@@ -397,7 +406,7 @@ function buildProps(e) {
         pixel_event_id: isString(e.pixel_event_id,  100)   ? e.pixel_event_id : null,
       };
     default:
-      return null;
+      return e.props || null;
   }
 }
 
@@ -419,7 +428,7 @@ async function insertEvent(e) {
     referrer:     isString(e.referrer || e.utm?.referrer, 500)
                     ? (e.referrer || e.utm?.referrer) : null,
     props:        buildProps(e),
-    data_version: "V3",  // v3: Mark all new events
+    data_version: "V3.3",
   });
   return error ? error.message : null;
 }
@@ -437,7 +446,7 @@ async function upsertSession(e) {
       referrer:     isString(e.utm?.referrer,     500) ? e.utm.referrer      : null,
       locale:       isString(e.locale,             20) ? e.locale            : null,
       screen_w:     isNumber(e.screen_w)               ? e.screen_w          : null,
-      data_version: "V3",  // v3: Mark all new sessions
+      data_version: "V3.3",
     },
     { onConflict: "id", ignoreDuplicates: false }
   );
@@ -487,12 +496,11 @@ function isRateLimited(ip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// POST HANDLER (v3)
+// POST HANDLER (v3.3)
 // ─────────────────────────────────────────────────────────────────────────
 export async function POST(request) {
   const headers = corsHeaders();
 
-  // Origin check
   const origin = request.headers.get("origin") || "";
   if (origin && origin !== ALLOWED_ORIGIN) {
     return new Response(JSON.stringify({ error: "Origin not allowed" }), {
@@ -500,7 +508,6 @@ export async function POST(request) {
     });
   }
 
-  // Rate limit
   const ip =
     request.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
     request.headers.get("x-real-ip") ||
@@ -514,7 +521,6 @@ export async function POST(request) {
 
   const userAgent = request.headers.get("user-agent") || "";
 
-  // Parse body
   let body;
   try { body = await request.json(); }
   catch {
@@ -536,15 +542,12 @@ export async function POST(request) {
     batch.map(async (event) => {
       if (!validateEvent(event)) { results.rejected++; return; }
 
-      // v3: Get or create customer from PII
       const customerId = await upsertCustomer(event, ip, event.session_id);
 
-      // v3: Log customer timeline
       if (customerId) {
         await insertCustomerTimeline(customerId, event);
       }
 
-      // v3.1: Update active_carts for add_to_cart events
       let cartPromise = Promise.resolve();
       if (event.type === "add_to_cart") {
         cartPromise = (async () => {
@@ -583,12 +586,11 @@ export async function POST(request) {
         })();
       }
 
-      // All writes in parallel — CAPI failure never blocks
       const [evtErr, sesErr] = await Promise.all([
         insertEvent(event),
         upsertSession(event),
         cartPromise,
-        sendCAPI(event, ip, userAgent, customerId).catch((e) =>
+        sendCAPI(event, ip, userAgent).catch((e) =>
           console.error("[HXA CAPI] Unhandled:", e.message)
         ),
       ]);
@@ -597,7 +599,6 @@ export async function POST(request) {
         results.rejected++;
         if (evtErr) results.db_errors.push(`event: ${evtErr}`);
         if (sesErr) results.db_errors.push(`session: ${sesErr}`);
-        console.error("[HXA API] DB error:", { evtErr, sesErr, type: event.type });
       } else {
         results.accepted++;
       }

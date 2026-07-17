@@ -1,8 +1,10 @@
 /**
- * HexNeedle Analytics — Tracking Script v3.1 (Multi-page Fix)
+ * HexNeedle Analytics — Tracking Script v3.3
  * ==========================================================
  * Features:
- *   - Enhanced selector logic for multi-page support
+ *   - Enhanced Meta Pixel & CAPI Advanced Matching
+ *   - Automatic fn/ln splitting from full name
+ *   - Cookie-based fbp/fbc tracking
  *   - Robust product name extraction for all shirt types
  *   - Customer identity tracking & Meta CAPI integration
  */
@@ -85,6 +87,18 @@
     });
   }
 
+  function getCookie(name) {
+    var value = "; " + doc.cookie;
+    var parts = value.split("; " + name + "=");
+    if (parts.length === 2) return parts.pop().split(";").shift();
+    return null;
+  }
+
+  function getUrlParam(name) {
+    var results = new RegExp('[\?&]' + name + '=([^&#]*)').exec(win.location.href);
+    return results ? decodeURIComponent(results[1]) : null;
+  }
+
   /* ─────────────────────────────────────────────
      SESSION MANAGER
   ───────────────────────────────────────────── */
@@ -123,12 +137,25 @@
 
     function update(newData) {
       var changed = false;
-      ['email', 'phone', 'name', 'city', 'state', 'fbclid'].forEach(function(k) {
+      var fields = [
+        'email', 'phone', 'name', 'city', 'state', 'zip', 'country', 
+        'fn', 'ln', 'fbclid', 'fbp', 'fbc', 'external_id'
+      ];
+      
+      // Handle name splitting
+      if (newData.name && newData.name !== pii.name) {
+        var parts = newData.name.trim().split(/\s+/);
+        if (parts.length > 0) newData.fn = parts[0];
+        if (parts.length > 1) newData.ln = parts.slice(1).join(" ");
+      }
+
+      fields.forEach(function(k) {
         if (newData[k] && newData[k] !== pii[k]) { 
           pii[k] = newData[k]; 
           changed = true; 
         }
       });
+
       if (changed) {
         try { localStorage.setItem(KEY, JSON.stringify(pii)); } catch (e) {}
       }
@@ -136,12 +163,27 @@
 
     function extractFromStorage() {
       var orderData = safeJSON(localStorage.getItem("orderData")) || {};
+      var fbclid = getUrlParam('fbclid') || pii.fbclid;
+      var fbp = getCookie('_fbp') || pii.fbp;
+      var fbc = getCookie('_fbc');
+      
+      // Construct fbc from fbclid if missing
+      if (!fbc && fbclid) {
+        fbc = "fb.1." + Date.now() + "." + fbclid;
+      }
+
       update({
-        email: orderData.email || pii.email,
-        phone: orderData.phone || pii.phone,
-        name:  orderData.name || orderData.firstName || pii.name,
-        city:  orderData.city || pii.city,
-        state: orderData.state || pii.state
+        email:       orderData.email || pii.email,
+        phone:       orderData.phone || pii.phone,
+        name:        orderData.name || orderData.firstName || pii.name,
+        city:        orderData.city || pii.city,
+        state:       orderData.state || pii.state,
+        zip:         orderData.zip || pii.zip,
+        country:     orderData.country || pii.country,
+        fbclid:      fbclid,
+        fbp:         fbp,
+        fbc:         fbc || pii.fbc,
+        external_id: SESSION.id()
       });
     }
 
@@ -212,17 +254,21 @@
   function trackPurchase() {
     if (!win.location.href.includes("thank-you")) return;
     var amount = parseFloat(localStorage.getItem("hexneedle_amount")) || 0;
+    var orderId = localStorage.getItem("hexneedle_order_id") || "";
     if (amount <= 0) return;
 
     var eventID = makeEventID("purchase");
-    QUEUE.push(buildEvent("purchase", { revenue: amount, currency: "INR", pixel_event_id: eventID }));
+    QUEUE.push(buildEvent("purchase", { revenue: amount, currency: "INR", order_id: orderId, pixel_event_id: eventID }));
     firePixel("Purchase", { value: amount, currency: "INR" }, eventID);
   }
 
   function trackPageView() {
-    QUEUE.push(buildEvent("pageview"));
+    var eventID = makeEventID("pv");
+    QUEUE.push(buildEvent("pageview", { pixel_event_id: eventID }));
     if (win.location.pathname.includes("/store/")) {
-      firePixel("ViewContent", { content_name: doc.title, currency: "INR" }, makeEventID("vc"));
+      var vcEventID = makeEventID("vc");
+      QUEUE.push(buildEvent("view_content", { pixel_event_id: vcEventID }));
+      firePixel("ViewContent", { content_name: doc.title, currency: "INR" }, vcEventID);
     }
   }
 
@@ -254,9 +300,59 @@
     firePixel("AddToCart", { content_name: name, currency: "INR", value: price }, eventID);
   }
 
+  function captureFormInputs() {
+    doc.addEventListener('blur', function(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
+        var name = e.target.name || '';
+        var val = e.target.value || '';
+        if (!val) return;
+
+        var data = {};
+        if (name.includes('email')) data.email = val;
+        if (name.includes('phone')) data.phone = val;
+        if (name.includes('first_name')) data.fn = val;
+        if (name.includes('last_name')) data.ln = val;
+        if (name.includes('city')) data.city = val;
+        if (name.includes('state')) data.state = val;
+        if (name.includes('zip')) data.zip = val;
+        if (name.includes('country')) data.country = val;
+        if (name.includes('full_name') || name === 'name') data.name = val;
+
+        if (Object.keys(data).length > 0) {
+          IDENTITY.update(data);
+        }
+      }
+    }, true);
+
+    doc.addEventListener('submit', function(e) {
+      var form = e.target;
+      var email = (form.querySelector('input[type="email"]') || {}).value;
+      var phone = (form.querySelector('input[name*="phone"]') || {}).value;
+      
+      if (email || phone) {
+        var eventID = makeEventID("fs");
+        // Check if it's likely a checkout/order form
+        var isFull = form.querySelector('input[name*="city"], input[name*="address"]');
+        QUEUE.push(buildEvent("form_submit", { 
+          has_email: !!email, 
+          has_phone: !!phone,
+          lead_score: isFull ? "full" : "partial",
+          pixel_event_id: eventID 
+        }));
+        
+        if (isFull) {
+          firePixel("InitiateCheckout", {}, eventID);
+        } else {
+          firePixel("Lead", {}, eventID);
+        }
+      }
+    }, true);
+  }
+
   function init() {
     trackPageView();
     trackPurchase();
+    captureFormInputs();
     doc.addEventListener("click", onClickCart, true);
     win.addEventListener("beforeunload", function () { QUEUE.flushSync(); });
   }
